@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     rate_limit_burst: float = 5.0
     breaker_threshold: int = 5
     breaker_reset_seconds: float = 30.0
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
 
     @field_validator("*", mode="before")
     @classmethod
