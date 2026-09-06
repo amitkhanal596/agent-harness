@@ -16,6 +16,7 @@ from .db import get_pool, run_migrations
 from .executor import Executor
 from .llm import LLMClient
 from .models import Completion, Message, ToolCall, ToolSpec
+from .otel import configure_tracing
 from .tools import build_registry
 from .tracer import Tracer
 
@@ -65,8 +66,9 @@ async def run_eval_set(
         registry = build_registry(
             shell_timeout=cfg.tool_timeout_seconds, http_timeout=cfg.tool_timeout_seconds
         )
+        configure_tracing(exporter=cfg.otel_exporter, endpoint=cfg.otel_endpoint or None)
         checkpointer = Checkpointer(pool)
-        tracer = Tracer(pool)
+        tracer = Tracer(pool, model=cfg.model)
         client = llm if llm is not None else _default_client(cfg)
 
         for task in tasks:

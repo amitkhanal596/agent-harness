@@ -18,6 +18,7 @@ from .db import get_pool, run_migrations
 from .executor import Executor
 from .guardrails import CircuitBreaker, GuardedLLMClient, RateLimiter
 from .llm import AnthropicClient, LLMClient
+from .otel import configure_tracing
 from .tools import build_registry
 from .tracer import Tracer
 
@@ -51,8 +52,9 @@ def build_agent(
     registry = build_registry(
         shell_timeout=settings.tool_timeout_seconds, http_timeout=settings.tool_timeout_seconds
     )
+    configure_tracing(exporter=settings.otel_exporter, endpoint=settings.otel_endpoint or None)
     checkpointer = Checkpointer(pool)
-    tracer = Tracer(pool)
+    tracer = Tracer(pool, model=settings.model)
     agent = Agent(
         llm=llm or build_llm(settings),
         registry=registry,

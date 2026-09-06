@@ -14,6 +14,9 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "typer>=0.12",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +54,7 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "anthropic.*"]
+module = ["asyncpg.*", "anthropic.*", "opentelemetry.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

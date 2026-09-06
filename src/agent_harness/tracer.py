@@ -9,6 +9,12 @@ from uuid import UUID
 import asyncpg
 
 from .models import Completion, State, ToolResult
+from .otel import (
+    llm_span,
+    record_error,
+    record_llm_result,
+    tool_span,
+)
 
 
 class Tracer:
@@ -18,13 +24,23 @@ class Tracer:
     propagate to the caller.
     """
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(self, pool: asyncpg.Pool, model: str = "unknown") -> None:
         self._pool = pool
+        self._model = model
 
     async def llm(
         self, state: State, comp: Completion, latency_ms: int, cost_usd: float
     ) -> None:
-        """Record one model call and add its tokens/cost to the run totals."""
+        """Record one model call and add its tokens/cost to the run totals.
+
+        Writes both the durable `run_events` row (queried by `agent trace`) and an
+        OpenTelemetry span using the GenAI semantic conventions, so the same data is
+        available to external observability tooling.
+        """
+        with llm_span(self._model, state.run_id, state.step_count) as span:
+            record_llm_result(
+                span, comp.stop_reason, comp.prompt_tokens, comp.output_tokens, cost_usd
+            )
         payload = {
             "text": comp.text,
             "stop_reason": comp.stop_reason,
@@ -62,7 +78,16 @@ class Tracer:
     async def tool(
         self, state: State, result: ToolResult, tool_name: str, latency_ms: int
     ) -> None:
-        """Record one tool call, including its error text when it failed."""
+        """Record one tool call, including its error text when it failed.
+
+        Emits a matching OTel `execute_tool` span; a tool error sets span status to
+        ERROR so failing tools show up on latency/error dashboards even though the loop
+        treats the failure as data.
+        """
+        with tool_span(tool_name, result.call_id, state.run_id, state.step_count) as span:
+            span.set_attribute("agent.tool.output_bytes", len(result.output))
+            if result.error is not None:
+                record_error(span, result.error)
         await self._pool.execute(
             """
             INSERT INTO run_events (run_id, step_number, kind, tool_name, input_json,

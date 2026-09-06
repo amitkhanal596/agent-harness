@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     cache_prompt: bool = False
     max_context_tokens: int = 150_000
     keep_recent_messages: int = 8
+    otel_exporter: str = "none"
+    otel_endpoint: str = ""
 
     @field_validator("*", mode="before")
     @classmethod

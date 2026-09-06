@@ -233,3 +233,26 @@ so a long run grew quadratically and would eventually exceed the model's context
   end-to-end check that compacted output still survives `to_anthropic_messages`.
 - Wired through `MAX_CONTEXT_TOKENS` / `KEEP_RECENT_MESSAGES` config into the CLI and
   the eval runner. Opt-in: an `Agent` without a `ContextManager` behaves exactly as before.
+
+### §3.1 OpenTelemetry with GenAI semantic conventions — ADDED ✅
+The bespoke `run_events` table was the only place trace data existed, so it could not
+reach Grafana / Datadog / Honeycomb / Langfuse without those tools learning a custom
+schema.
+- New `otel.py`: `configure_tracing()` (exporter selected by config — `none` by default
+  so instrumentation is free when unused, `console` for local debugging, `otlp` for a
+  collector), plus `llm_span` / `tool_span` / `run_span` context managers and
+  `record_llm_result` / `record_error`.
+- Attributes follow the **OpenTelemetry GenAI semantic conventions**: `gen_ai.system`,
+  `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.response.finish_reasons`,
+  `gen_ai.usage.input_tokens` / `.output_tokens`, `gen_ai.tool.name`,
+  `gen_ai.tool.call.id`. Span names follow the convention too (`chat {model}`,
+  `execute_tool {name}`). Cost is namespaced `agent.cost.usd` since the conventions do
+  not yet cover it.
+- Emitted **alongside** the Postgres rows, not instead of them — `agent trace` keeps
+  working and the DB stays the durable system of record.
+- A failed tool sets span status to ERROR even though the loop treats the failure as
+  data, so broken tools appear on latency/error dashboards.
+- 7 tests in `tests/test_otel.py` asserting on **real exported span content** via an
+  in-memory exporter (not just "it didn't raise"), including a cross-check that span
+  counts match the `run_events` rows. Verified live with the console exporter: all 8
+  `gen_ai.*` attributes present on a real run.
