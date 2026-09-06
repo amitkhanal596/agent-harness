@@ -12,6 +12,7 @@ from .executor import Executor
 from .llm import LLMClient, cost_usd
 from .logging import get_logger, log_context
 from .models import Completion, Message, State, ToolResult
+from .sanitize import sanitize_tool_output
 from .tools.base import Registry
 
 logger = get_logger(__name__)
@@ -91,6 +92,7 @@ class Agent:
         budget_usd: float = 1.00,
         context: ContextManager | None = None,
         shutdown: asyncio.Event | None = None,
+        sanitize: bool = True,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -101,6 +103,7 @@ class Agent:
         self.budget_usd = budget_usd
         self.context = context
         self._shutdown = shutdown
+        self.sanitize = sanitize
         self.total_cost_usd = 0.0
         self.last_compaction: CompactionResult | None = None
 
@@ -167,10 +170,26 @@ class Agent:
                     tool_latency_ms = int((time.perf_counter() - t1) * 1000)
 
                     for result, call in zip(results, comp.tool_calls, strict=True):
-                        content = (
-                            result.output if result.error is None
-                            else f"ERROR: {result.error}"
-                        )
+                        if result.error is not None:
+                            content = f"ERROR: {result.error}"
+                        else:
+                            # Tool output is untrusted: redact credentials and flag any
+                            # text trying to issue instructions before the model sees it.
+                            clean = sanitize_tool_output(
+                                result.output, call.name, redact=self.sanitize,
+                                flag_injection=self.sanitize,
+                            )
+                            content = clean.text
+                            if clean.modified:
+                                logger.warning(
+                                    "tool output sanitized",
+                                    extra={"tool": call.name,
+                                           "secrets_redacted": clean.secrets_redacted,
+                                           "injections_found": clean.injections_found},
+                                )
+                                # Persist and replay the sanitized text, never the raw
+                                # secret: state_json goes to the database too.
+                                result = result.model_copy(update={"output": clean.text})
                         state.messages.append(
                             Message(role="tool", content=content,
                                     tool_call_id=result.call_id)

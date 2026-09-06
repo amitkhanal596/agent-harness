@@ -315,3 +315,26 @@ There was no embedding step, no vector store, and no retrieval tool at all.
 - 24 tests; on a plain Postgres without the extension, 14 still run and 10 skip cleanly
   (**209 passed, 10 skipped**). CI and docker-compose now use the pgvector image so the
   retrieval tests actually execute there.
+
+### §3.6 Prompt-injection defence + §3.7 Secrets redaction — ADDED ✅
+Tool output went to the model and into `run_events` completely unfiltered: a secret in
+a config file landed in the database in plaintext, and a fetched page saying "ignore
+previous instructions" was fed to the model as-is.
+- New `sanitize.py`, one pass over tool output handling both concerns.
+- **Secrets**: patterns for Anthropic/OpenAI/AWS/GitHub/Slack/Google keys, PEM private
+  key blocks, JWTs, connection-string passwords, and generic `SECRET/PASSWORD/TOKEN=`
+  assignments. Redaction preserves useful shape — a DSN keeps its username, host, and
+  database; only the password is replaced — so the model still has context.
+- **Injection**: rather than trying to strip offending phrases (brittle), suspicious
+  output is **wrapped in an explicit untrusted-data envelope** naming the tool and
+  telling the model in the same turn that the content is data, not a directive. The
+  content is preserved so the model can still analyse and report on it.
+- Wired into the loop *before* the tool result becomes a `Message`, so the redacted
+  text is what gets sent, checkpointed, **and** traced — one fix covers all three sinks.
+- 37 tests, including the end-to-end guarantee: a live-looking key in a file reaches
+  **neither** the model's next prompt, **nor** `state.messages`, **nor**
+  `run_events.output_json`, **nor** the checkpoint JSON — while the non-secret content
+  in the same file still gets through.
+- Honest about limits: both passes are heuristic defence-in-depth behind the real
+  controls (the `run_shell` allowlist, the non-root container user, the budget cap).
+  The module docstring says so rather than overclaiming.
