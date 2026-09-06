@@ -159,3 +159,26 @@ the line or follows whitespace, leaving a `#` inside a URL or password intact.
 | Cost / latency per completed eval task | $0.001725 avg, ~50 ms avg |
 | Eval success rate | 100% baseline, 83% regressed |
 | Hanging-tool workload ×3, before/after M3 | 0 completed / 3 hung → 3 completed / 0 crashed |
+
+## Final audit
+- §3 layout: every specified file present, with two additions —
+  `src/agent_harness/evals_runner.py` (the engine both `agent eval` and
+  `evals/run_eval.py` call) and `tests/helpers.py` (the shared `MockLLMClient`, since
+  `tests/` is not an importable package).
+- §1 MUST NOTs: no LangChain / LangGraph / LlamaIndex / CrewAI / AutoGen / Haystack
+  anywhere; no `requests`, `time.sleep`, or blocking `subprocess` in `src/`; no bare
+  `except:`; no secrets in code; `.env` git-ignored.
+- State serialization goes through `model_dump_json()` / `model_validate_json()`.
+- `mypy --strict src` clean; every function in `src/` is typed.
+- Tests are deterministic and hit no network. Without Postgres the suite still runs:
+  **76 passed, 17 skipped, 0 failed**.
+
+## How to verify this build
+```bash
+./scripts/setup.sh                  # venv, install, Postgres check, migrations
+./.venv/bin/pytest -q               # 93 passed
+./.venv/bin/ruff check .            # clean
+./.venv/bin/mypy src                # clean (strict)
+./.venv/bin/agent eval --mock       # 100% pass rate, offline
+./.venv/bin/python scripts/instrument.py   # regenerate the §9 metrics
+```
