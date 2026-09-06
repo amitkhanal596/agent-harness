@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -124,3 +125,52 @@ async def test_run_shell_nonzero_exit_is_reported() -> None:
 async def test_http_get_rejects_bad_scheme() -> None:
     with pytest.raises(ValueError):
         await HttpGetTool().execute(HttpGetInput(url="file:///etc/passwd"))
+
+
+async def test_read_file_does_not_load_the_whole_file_into_memory(tmp_path: Path) -> None:
+    """§2.11: a 64 KB cap must not require reading a multi-gigabyte file first.
+
+    Uses a sparse file so the test is fast and cheap: 2 GiB logical size, almost no
+    blocks on disk. Before the fix this called `read_bytes()` and would try to
+    materialise all 2 GiB.
+    """
+    import resource
+
+    def _make_sparse() -> None:
+        with open(big, "wb") as handle:
+            handle.truncate(2 * 1024**3)  # 2 GiB sparse
+            handle.seek(0)
+            handle.write(b"first line of the log\n")
+
+    big = tmp_path / "huge.log"
+    await asyncio.to_thread(_make_sparse)
+
+    assert big.stat().st_size == 2 * 1024**3
+
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    out = await ReadFileTool().execute(ReadFileInput(path=str(big)))
+    after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    assert out.startswith("first line of the log")
+    assert "[truncated at" in out
+    # Peak RSS must not have grown by anything close to the file size.
+    assert after - before < 200 * 1024 * 1024, "read_file appears to have slurped the file"
+
+
+async def test_read_file_at_exactly_the_cap_is_not_marked_truncated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Boundary: `limit + 1` read must distinguish 'exactly full' from 'more remains'."""
+    import agent_harness.tools.read_file as rf
+
+    monkeypatch.setattr(rf, "MAX_BYTES", 100)
+    exact = tmp_path / "exact.txt"
+    exact.write_bytes(b"y" * 100)
+    out = await rf.ReadFileTool().execute(rf.ReadFileInput(path=str(exact)))
+    assert "[truncated" not in out
+    assert out == "y" * 100
+
+    over = tmp_path / "over.txt"
+    over.write_bytes(b"y" * 101)
+    out = await rf.ReadFileTool().execute(rf.ReadFileInput(path=str(over)))
+    assert "[truncated at 100 bytes]" in out

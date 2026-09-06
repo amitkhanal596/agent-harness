@@ -257,6 +257,56 @@ def trace(run_id: str = typer.Argument(..., help="Run id to trace.")) -> None:
     _run_async(_main)
 
 
+@app.command()
+def doctor(
+    idle_seconds: float = typer.Option(
+        3600.0, help="Flag non-terminal runs idle longer than this."
+    ),
+) -> None:
+    """Report data-consistency problems: orphaned trace events and stalled runs.
+
+    Trace events and checkpoints are written in separate transactions (coupling them
+    would make a tracer outage fail the run), so a mid-step crash can leave an event
+    whose step was never checkpointed. This surfaces that drift instead of hiding it.
+    """
+
+    async def _main() -> None:
+        settings = get_settings()
+        pool = await get_pool(settings.database_url)
+        try:
+            await run_migrations(pool)
+            tracer = Tracer(pool)
+            orphans = await tracer.orphaned_events()
+            stale = await tracer.stale_runs(idle_seconds)
+
+            if orphans:
+                typer.echo(f"orphaned trace events ({len(orphans)} step(s)):")
+                for row in orphans:
+                    typer.echo(
+                        f"  run {row['run_id']} step {row['step_number']}: "
+                        f"{row['event_count']} event(s) with no checkpoint"
+                    )
+            else:
+                typer.echo("orphaned trace events: none")
+
+            if stale:
+                typer.echo(f"\nstalled runs ({len(stale)}):")
+                for row in stale:
+                    typer.echo(
+                        f"  {row['id']} status={row['status']} step={row['step_count']} "
+                        f"idle={row['idle_for']}  resume: agent resume {row['id']}"
+                    )
+            else:
+                typer.echo("stalled runs: none")
+
+            if orphans or stale:
+                raise typer.Exit(code=1)
+        finally:
+            await pool.close()
+
+    _run_async(_main)
+
+
 @app.command("eval")
 def eval_command(
     tasks: str = typer.Option("evals/tasks.jsonl", help="Path to the labeled task set."),

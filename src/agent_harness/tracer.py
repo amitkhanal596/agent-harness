@@ -114,6 +114,36 @@ class Tracer:
         )
         return float(total) if total is not None else 0.0
 
+    async def orphaned_events(self, run_id: UUID | None = None) -> list[dict[str, Any]]:
+        """Trace events whose step was never checkpointed.
+
+        The loop writes trace events and checkpoints in separate transactions on
+        purpose: sharing one transaction would make a tracer outage fail the run, which
+        is the wrong trade for observability data. The cost of that choice is possible
+        drift after a mid-step crash, so the drift is made detectable here rather than
+        left silent. An empty list is the healthy state.
+        """
+        if run_id is None:
+            rows = await self._pool.fetch("SELECT * FROM orphaned_events ORDER BY run_id")
+        else:
+            rows = await self._pool.fetch(
+                "SELECT * FROM orphaned_events WHERE run_id = $1 ORDER BY step_number",
+                run_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def stale_runs(self, idle_seconds: float = 3600.0) -> list[dict[str, Any]]:
+        """Runs stuck in a non-terminal state with no activity for `idle_seconds`.
+
+        The signature of a process that died without persisting a terminal status.
+        """
+        rows = await self._pool.fetch(
+            "SELECT * FROM stale_runs WHERE idle_for > make_interval(secs => $1)"
+            " ORDER BY updated_at",
+            idle_seconds,
+        )
+        return [dict(row) for row in rows]
+
     async def timeline(self, run_id: UUID) -> list[dict[str, Any]]:
         """Every event for `run_id` in insertion order, for `agent trace`."""
         rows = await self._pool.fetch(
