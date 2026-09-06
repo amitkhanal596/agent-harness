@@ -38,6 +38,7 @@ def build_llm(settings: Settings) -> LLMClient:
         model=settings.model,
         api_key=settings.anthropic_api_key,
         base_url=settings.anthropic_base_url or None,
+        cache_prompt=settings.cache_prompt,
     )
     return GuardedLLMClient(client, RateLimiter(rate=2.0, capacity=5), CircuitBreaker())
 

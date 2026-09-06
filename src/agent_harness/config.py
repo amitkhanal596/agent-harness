@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     tool_max_retries: int = 2
     run_budget_usd: float = 1.00
     anthropic_base_url: str = ""
+    cache_prompt: bool = False
 
     @field_validator("*", mode="before")
     @classmethod

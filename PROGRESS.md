@@ -123,3 +123,39 @@ milestone's own acceptance checks.
 came back as the literal string `# required`, so `agent config` reported a key as set
 when none was. Added a `field_validator` that strips a `#` comment only when it starts
 the line or follows whitespace, leaving a `#` inside a URL or password intact.
+
+### M9 — Optional stretch (partially done) ✅
+- **Local model swap**: verified end to end. Running the real `AnthropicClient` against
+  a local Anthropic-compatible stub server via `ANTHROPIC_BASE_URL` alone, `agent run`
+  completed the spec's own example task — the model requested `read_file`, the tool ran,
+  the result returned as a `tool_result` block, and the answer came from the real file
+  ("The configured port is 8080."). Tests lock the pass-through in.
+- **Prompt caching**: opt-in `CACHE_PROMPT=true` puts one cache breakpoint on the last
+  tool definition (the stable prefix of every request in a run).
+- Not done (explicitly optional): sub-agent tool, web timeline UI.
+
+## Definition of done — verified
+- M0–M8 complete, each with its acceptance checks passing before moving on.
+- `pytest` **93 passed**, `ruff check` clean, `mypy src` clean (strict).
+- `agent run "read ./config.txt and tell me the configured port"` completes end to end
+  and prints the final answer plus the run id.
+- `agent resume` continued a genuinely interrupted run (step 2 → completed);
+  `agent replay`, `agent trace`, and `agent eval` all work as specified.
+- No agent framework anywhere — loop, executor, checkpointer, and concurrency are all
+  hand-written; `anthropic` is the only model dependency, behind an `LLMClient` Protocol.
+
+## Docs produced
+- `DOCS.md` — operator's guide: setup, commands, config table, loop diagram, tool
+  guardrails, durability, local-model swap, testing, and the measured metrics.
+- `scripts/setup.sh` — executable, idempotent version of README §12.
+- `scripts/instrument.py` — regenerates the §9 instrumentation table.
+
+## §9 instrumentation (measured, `scripts/instrument.py`)
+| Metric | Result |
+|---|---|
+| Checkpoint write latency | p50 1.22 ms / p95 2.85 ms (n=28) |
+| Resume vs restart, 12-step run | restart 47 ms vs resume-from-step-10 20 ms (2.3× less work) |
+| Multi-tool step, 5 × 200 ms | sequential 1006 ms vs concurrent 202 ms (5.0×) |
+| Cost / latency per completed eval task | $0.001725 avg, ~50 ms avg |
+| Eval success rate | 100% baseline, 83% regressed |
+| Hanging-tool workload ×3, before/after M3 | 0 completed / 3 hung → 3 completed / 0 crashed |

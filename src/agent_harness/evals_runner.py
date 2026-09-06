@@ -125,6 +125,7 @@ def _default_client(cfg: Settings) -> LLMClient:
             model=cfg.model,
             api_key=cfg.anthropic_api_key,
             base_url=cfg.anthropic_base_url or None,
+            cache_prompt=cfg.cache_prompt,
         ),
         RateLimiter(rate=2.0, capacity=5),
         CircuitBreaker(),

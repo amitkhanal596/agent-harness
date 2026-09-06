@@ -85,17 +85,30 @@ class AnthropicClient:
         api_key: str,
         max_tokens: int = 4096,
         base_url: str | None = None,
+        cache_prompt: bool = False,
     ) -> None:
         self._client = AsyncAnthropic(api_key=api_key, base_url=base_url or None)
         self._model = model
         self._max_tokens = max_tokens
+        self._cache_prompt = cache_prompt
+
+    def _tool_payload(self, tools: list[ToolSpec]) -> list[dict[str, Any]]:
+        """Tool definitions, with a cache breakpoint on the last one when caching is on.
+
+        Tool definitions are the longest stable prefix of every request in a run, so one
+        breakpoint at their end lets the provider reuse them across iterations.
+        """
+        payload = [t.model_dump() for t in tools]
+        if self._cache_prompt and payload:
+            payload[-1]["cache_control"] = {"type": "ephemeral"}
+        return payload
 
     async def complete(self, messages: list[Message], tools: list[ToolSpec]) -> Completion:
         """Call the model once and normalize the response into a Completion."""
         resp = await self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            tools=cast(Any, [t.model_dump() for t in tools]),
+            tools=cast(Any, self._tool_payload(tools)),
             messages=cast(Any, to_anthropic_messages(messages)),
         )
         text = ""
