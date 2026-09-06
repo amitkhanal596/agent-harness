@@ -78,3 +78,14 @@ milestone's own acceptance checks.
 - Acceptance: after a 2-step run `run_events` holds exactly one `llm_call` per step plus
   one `tool_call` per tool; `agent trace` event totals equal the persisted run totals
   (verified live: 5 events, 4325 tokens, $0.014475 both ways).
+
+### M6 — Concurrency ✅
+- `Executor.run_all` fans out over `asyncio.TaskGroup`, writing into a pre-sized slot
+  list so results always align with the input order regardless of finish order.
+- `FatalToolError` + `except*`: a fatal tool cancels its siblings; calls that already
+  finished keep their results, cancelled ones report `cancelled: sibling tool raised …`.
+- Acceptance: three ~300 ms tools finish in ≈300 ms not ≈900 ms (timing assertion);
+  a fatal sibling cancels two 2 s tools in <1 s with the result list still aligned to
+  the inputs; partial results retained.
+- §9 instrumentation: 5 tools × 200 ms → **sequential 1007 ms vs concurrent 202 ms
+  (5.0× speedup)**.
