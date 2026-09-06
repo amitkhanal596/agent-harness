@@ -11,31 +11,9 @@ import pytest
 import pytest_asyncio
 
 from agent_harness.db import get_pool, run_migrations
-from agent_harness.models import Completion, Message, ToolSpec
+from helpers import MockLLMClient
 
 DB_URL = os.environ.get("TEST_DATABASE_URL", "postgres://postgres:dev@localhost:5432/agent")
-
-
-class MockLLMClient:
-    """Replays a scripted list of Completions; records what it was asked.
-
-    Raises RuntimeError when the script is exhausted so runaway loops fail loudly.
-    """
-
-    def __init__(self, script: list[Completion], repeat_last: bool = False) -> None:
-        self.script = list(script)
-        self.repeat_last = repeat_last
-        self.calls: list[list[Message]] = []
-        self.tools_seen: list[list[ToolSpec]] = []
-
-    async def complete(self, messages: list[Message], tools: list[ToolSpec]) -> Completion:
-        self.calls.append(list(messages))
-        self.tools_seen.append(list(tools))
-        if not self.script:
-            raise RuntimeError("MockLLMClient script exhausted")
-        if self.repeat_last and len(self.script) == 1:
-            return self.script[0]
-        return self.script.pop(0)
 
 
 @pytest.fixture

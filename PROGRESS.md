@@ -33,3 +33,17 @@ milestone's own acceptance checks.
 - Acceptance: stubbed SDK response maps a `tool_use` block to `Completion.tool_calls`
   and an `end_turn` text block to `Completion.text` with token counts populated; a
   `role=="tool"` message serializes to a user `tool_result` block. 11 tests pass.
+
+### M2 — Registry + tools + loop ✅
+- `tools/base.py` (`Tool` ABC + `Registry`) and all five tools: `read_file` (64 KB cap,
+  truncation noted), `list_dir`, `grep` (pure-Python regex over a file or tree),
+  `run_shell` (executable allowlist, no shell metacharacters, timeout + kill),
+  `http_get` (scheme check, 32 KB cap). `build_registry()` wires them up.
+- `executor.py`: lookup → schema validation → `asyncio.wait_for` → retry.
+- `agent.py`: the §6 loop plus `BudgetExceeded` / `MaxStepsExceeded`; checkpointer and
+  tracer are optional collaborators (null objects) so the loop runs before the DB lands.
+- Blocking file I/O is pushed to threads via `asyncio.to_thread`; subprocesses use
+  `asyncio.create_subprocess_exec`.
+- Acceptance: scripted `read_file` → answer returns the file's contents and the tool
+  output is provably fed back to the model; unknown-tool and invalid-input calls produce
+  `ToolResult.error` rather than exceptions. 36 tests pass.

@@ -37,6 +37,9 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["agent_harness", "helpers"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
@@ -50,4 +53,5 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
