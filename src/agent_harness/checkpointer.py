@@ -44,7 +44,9 @@ class Checkpointer:
     async def save(self, state: State) -> None:
         """Checkpoint `state` and refresh the run summary row. Timed for §9 metrics."""
         t0 = time.perf_counter()
-        payload = state.model_dump_json()
+        # Defence in depth: tool output is scrubbed upstream, but a NUL reaching jsonb
+        # fails the write and takes the run down, so never let one through here either.
+        payload = state.model_dump_json().replace("\\u0000", "\\\\u0000")
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(

@@ -26,6 +26,12 @@ from dataclasses import dataclass, field
 
 REDACTED = "[REDACTED]"
 
+#: Postgres `jsonb` cannot store a NUL byte, so text containing one cannot be
+#: checkpointed or traced — the write fails with UntranslatableCharacterError and the
+#: run dies. Tool output is arbitrary bytes (a binary file, a compiled artifact, a
+#: process writing raw output), so it must be scrubbed before it becomes state.
+NUL = "\x00"
+
 #: Patterns for credentials worth never persisting. Ordered most-specific first so a
 #: provider-shaped key is labelled precisely rather than by the generic assignment rule.
 SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -83,10 +89,25 @@ class SanitizeResult:
     text: str
     secrets_redacted: list[str] = field(default_factory=list)
     injections_found: list[str] = field(default_factory=list)
+    stripped_unstorable: bool = False
 
     @property
     def modified(self) -> bool:
-        return bool(self.secrets_redacted or self.injections_found)
+        return bool(
+            self.secrets_redacted or self.injections_found or self.stripped_unstorable
+        )
+
+
+def strip_unstorable(text: str) -> tuple[str, bool]:
+    """Remove characters Postgres `jsonb` cannot represent.
+
+    Returns the cleaned text and whether anything was removed. Called before any tool
+    output becomes part of the state, because a NUL byte would otherwise fail the
+    checkpoint write and take the whole run down with it.
+    """
+    if NUL not in text:
+        return text, False
+    return text.replace(NUL, "\\x00"), True
 
 
 def redact_secrets(text: str) -> tuple[str, list[str]]:
@@ -122,6 +143,10 @@ def sanitize_tool_output(
     model, in the same turn, that everything inside is data from `tool_name` and not a
     directive, which is far more robust than trying to strip the offending phrases.
     """
+    # Always strip unstorable characters, even when redaction is disabled: this is a
+    # durability requirement, not a policy choice.
+    text, stripped = strip_unstorable(text)
+
     secrets: list[str] = []
     if redact:
         text, secrets = redact_secrets(text)
@@ -139,4 +164,9 @@ def sanitize_tool_output(
             f"</untrusted_tool_output>"
         )
 
-    return SanitizeResult(text=text, secrets_redacted=secrets, injections_found=injections)
+    return SanitizeResult(
+        text=text,
+        secrets_redacted=secrets,
+        injections_found=injections,
+        stripped_unstorable=stripped,
+    )

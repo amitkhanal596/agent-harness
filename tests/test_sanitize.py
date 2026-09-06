@@ -281,3 +281,71 @@ async def test_sanitization_is_opt_out_at_the_agent_level() -> None:
     await agent.run(state)
     tool_msg = next(m for m in state.messages if m.role == "tool")
     assert "supersecret12345" in tool_msg.content
+
+
+# --- unstorable characters (found by fuzzing, §2.12) ----------------------------------
+
+
+def test_nul_bytes_are_stripped() -> None:
+    """Regression: a NUL in tool output made the checkpoint write fail and killed the run.
+
+    Postgres `jsonb` cannot represent \\u0000, so reading any binary file would raise
+    UntranslatableCharacterError from `Checkpointer.save`. Found by the §2.12 fuzzer.
+    """
+    from agent_harness.sanitize import strip_unstorable
+
+    cleaned, stripped = strip_unstorable("binary\x00data")
+    assert "\x00" not in cleaned
+    assert stripped is True
+    assert "binary" in cleaned and "data" in cleaned
+
+
+def test_text_without_nul_is_untouched() -> None:
+    from agent_harness.sanitize import strip_unstorable
+
+    cleaned, stripped = strip_unstorable("ordinary text")
+    assert cleaned == "ordinary text"
+    assert stripped is False
+
+
+def test_sanitize_always_strips_nul_even_with_redaction_disabled() -> None:
+    """Storability is a durability requirement, not a policy choice."""
+    result = sanitize_tool_output(
+        "data\x00here", "read_file", redact=False, flag_injection=False
+    )
+    assert "\x00" not in result.text
+    assert result.stripped_unstorable
+    assert result.modified
+
+
+async def test_binary_tool_output_does_not_kill_the_run(
+    db_pool: asyncpg.Pool, tmp_path: Path
+) -> None:
+    """End-to-end: reading a binary file must complete, not crash the checkpoint."""
+    binary = tmp_path / "artifact.bin"
+    binary.write_bytes(b"ELF\x00\x01\x02binary content\x00more")
+
+    registry = build_registry()
+    cp = Checkpointer(db_pool)
+    llm = MockLLMClient(
+        [
+            Completion(
+                stop_reason="tool_use",
+                tool_calls=[ToolCall(id="t1", name="read_file",
+                                     input={"path": str(binary)})],
+            ),
+            Completion(stop_reason="end_turn", text="it is a binary file"),
+        ]
+    )
+    agent = Agent(
+        llm=llm,
+        registry=registry,
+        executor=Executor(registry, timeout=5.0, max_retries=0),
+        checkpointer=cp,
+    )
+    state = await cp.create_run("read the artifact")
+    assert await agent.run(state) == "it is a binary file"
+
+    # The checkpoint landed and reloads cleanly.
+    restored = await cp.latest(state.run_id)
+    assert restored.status == "completed"

@@ -447,3 +447,32 @@ expressed at all.
 - Task set grew to 7, now tagged and using the full range of criteria types.
 - 20 new tests. Deliberately did **not** take a Ragas/DeepEval dependency — see
   `DESIGN_DECISIONS.md` for why.
+
+### §2.12 No load or chaos tests — ADDED ✅ (and fuzzing found a real durability bug)
+The suite was strong on unit/integration behaviour but never exercised contention or
+partial failure, which is where durable-execution designs actually break.
+- New `tests/test_load_chaos.py`, 23 tests across four categories:
+  - **Contention**: 25 concurrent runs on one pool land correct, isolated state; racing
+    upserts on the same `(run_id, step)` serialise without deadlock; 30 racing tracer
+    increments sum exactly (no lost updates); 50-way tool fan-out stays ordered.
+  - **Resource limits**: 20 concurrent queries through a 2-connection pool **queue
+    rather than fail**.
+  - **Chaos**: injected model failures leave a resumable checkpoint (and the run does
+    resume to completion); a sustained outage is contained — 100 attempts reach the
+    provider only 5 times; a fatal tool amid 30 concurrent siblings cancels everything
+    in under 5s with alignment preserved; a runaway model is bounded exactly at the cap.
+  - **Fuzzing**: randomised tool names and payloads (including control characters,
+    emoji, and non-ASCII) must always yield a `ToolResult`, never an exception; fuzzed
+    state must survive a checkpoint round-trip.
+
+#### Bug found by the fuzzer: NUL bytes killed runs
+`UntranslatableCharacterError: \u0000 cannot be converted to text`. Postgres `jsonb`
+cannot store a NUL, so **reading any binary file — a compiled artifact, an ELF header —
+failed the checkpoint write and destroyed the run.** Nothing in the existing 333 tests
+touched this because they all used text fixtures.
+- Fixed at two layers: `strip_unstorable()` runs on every tool output *before* it becomes
+  state (and runs **even when redaction is disabled**, because storability is a
+  durability requirement, not a policy choice), plus a defensive escape in
+  `Checkpointer.save` so no other path can reintroduce one.
+- Regression test reads a real binary file end to end. **Verified it fails when either
+  layer of the fix is reverted.**
