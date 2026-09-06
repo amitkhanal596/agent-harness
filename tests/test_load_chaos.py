@@ -110,8 +110,15 @@ async def test_concurrent_tracing_totals_are_not_lost(db_pool: asyncpg.Pool) -> 
 
 
 async def test_pool_exhaustion_queues_rather_than_failing() -> None:
-    """More concurrent work than connections must wait, not raise."""
-    pool = await asyncpg.create_pool(dsn=DB_URL, min_size=1, max_size=2)
+    """More concurrent work than connections must wait, not raise.
+
+    Builds its own small pool rather than using the `db_pool` fixture, so it needs its
+    own skip when Postgres is unavailable.
+    """
+    try:
+        pool = await asyncpg.create_pool(dsn=DB_URL, min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"postgres unavailable: {exc}")
     assert pool is not None
     try:
         async def query(n: int) -> int:

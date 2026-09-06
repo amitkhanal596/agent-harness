@@ -476,3 +476,50 @@ touched this because they all used text fixtures.
   `Checkpointer.save` so no other path can reintroduce one.
 - Regression test reads a real binary file end to end. **Verified it fails when either
   layer of the fix is reverted.**
+
+---
+
+## Phase 2 complete — all 21 CRITIQUE.md items addressed
+
+| Item | Outcome |
+|---|---|
+| §2.1 unbounded context | `ContextManager`: truncate old tool results, then drop oldest turn-groups; never orphans a `tool_use` |
+| §2.2 in-process guardrails | Postgres-backed distributed limiter + breaker (opt-in; see `DESIGN_DECISIONS.md` §3) |
+| §2.3 resume budget reset | **Real bug fixed** — budget now seeded from persisted spend |
+| §2.4 no graceful shutdown | `RunPaused` at step boundaries, SIGINT/SIGTERM handlers, resumable |
+| §2.5 `run_shell` allowlist | **Sandbox escape closed** — interpreters removed, arguments validated |
+| §2.6 pool per invocation | FastAPI service with one process-lifetime pool, 7 routes |
+| §2.7 trace/checkpoint drift | Made detectable, not atomic (see `DESIGN_DECISIONS.md` §1) |
+| §2.8 one provider | `OpenAIClient` in a genuinely different dialect; loop runs unchanged on it |
+| §2.9 no streaming | `StreamingLLMClient` Protocol (see `DESIGN_DECISIONS.md` §4) |
+| §2.10 no structured logging | JSON lines on stderr, `run_id`/`step` via ContextVar |
+| §2.11 `read_file` slurps | **Fixed** — reads `limit + 1` bytes; 2 GiB sparse-file test |
+| §2.12 no load/chaos tests | 23 tests; **fuzzer found the NUL-byte durability bug** |
+| §3.1 no OpenTelemetry | GenAI semantic conventions, alongside the Postgres rows |
+| §3.2 substring-only evals | Regex, numeric tolerance, LLM judge, per-criterion detail (see `DESIGN_DECISIONS.md` §2) |
+| §3.3 no RAG | pgvector in the existing Postgres, HNSW, `search_docs`, `agent index` |
+| §3.4 no MCP | Adapters both directions, validation before dispatch |
+| §3.5 no multi-agent | `spawn_agent`; children are ordinary runs with `parent_run_id` |
+| §3.6 no injection defence | Untrusted-data envelope naming the tool |
+| §3.7 no secret redaction | Redacted before model, checkpoint, and traces alike |
+| §3.8 no containerization | Multi-stage Dockerfile (non-root) + compose; **found the migrations-path bug** |
+| §3.9 no CI | 3-version matrix, no-postgres job, bandit + pip-audit |
+
+### Bugs found and fixed during Phase 2
+1. **Resume budget reset** (§2.3, from the critique) — budget guarantee void across restarts.
+2. **`run_shell` sandbox escape** (§2.5, from the critique) — `python3 -c` bypassed the allowlist.
+3. **`read_file` unbounded read** (§2.11, from the critique) — OOM on large files.
+4. **`MIGRATIONS_DIR` broken when installed** (found by containerizing) — migrations
+   silently applied nothing in Docker.
+5. **NUL bytes destroyed runs** (found by the fuzzer) — reading any binary file failed
+   the checkpoint write.
+
+Each has a regression test, and for #1, #3, and #5 the test was **verified to fail against
+the pre-fix code**.
+
+### Final state
+- **360 tests pass, 10 skipped** (pgvector absent locally); **370 pass** with pgvector.
+- Without Postgres: **276 pass, 94 skipped, 0 failures.**
+- `ruff check`, `mypy src` (strict), and `bandit -ll` all clean.
+- `docker compose up` → migrations → **7/7 eval tasks pass inside the container**.
+- Source grew from ~1,700 to ~4,000 lines across 29 modules; 5 migrations.
