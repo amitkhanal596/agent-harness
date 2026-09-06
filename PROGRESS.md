@@ -89,3 +89,14 @@ milestone's own acceptance checks.
   the inputs; partial results retained.
 - §9 instrumentation: 5 tools × 200 ms → **sequential 1007 ms vs concurrent 202 ms
   (5.0× speedup)**.
+
+### M7 — Guardrails ✅
+- `guardrails.py`: token-bucket `RateLimiter` (lock-protected, burst to capacity),
+  `CircuitBreaker` (closed → open at threshold → half-open after cooldown),
+  `check_budget`, and `GuardedLLMClient` wrapping any `LLMClient`.
+- The loop enforces the per-run budget after every model call, persisting
+  `status="failed"` before raising `BudgetExceeded`.
+- Acceptance: 3 consecutive simulated API failures trip the breaker and the next 4 calls
+  fail fast with `CircuitOpen` **without reaching the client** (asserted via a call
+  counter that stays at 3); a run with a $0.000001 budget aborts with `BudgetExceeded`
+  and `status="failed"` persisted in both the checkpoint and the `agent_runs` row.
