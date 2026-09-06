@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     otel_endpoint: str = ""
     log_level: str = "INFO"
     log_json: bool = True
+    voyage_api_key: str = ""
+    embedding_model: str = "voyage-3"
 
     @field_validator("*", mode="before")
     @classmethod

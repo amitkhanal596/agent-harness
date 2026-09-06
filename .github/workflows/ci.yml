@@ -19,7 +19,8 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # pgvector image so the retrieval tests run rather than skip.
+        image: pgvector/pgvector:pg17
         env:
           POSTGRES_PASSWORD: dev
           POSTGRES_DB: agent
@@ -34,6 +35,7 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:dev@localhost:5432/agent
       TEST_DATABASE_URL: postgres://postgres:dev@localhost:5432/agent
+      TEST_VECTOR_DATABASE_URL: postgres://postgres:dev@localhost:5432/agent
 
     steps:
       - uses: actions/checkout@v4

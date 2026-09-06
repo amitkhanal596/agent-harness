@@ -1,6 +1,7 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector build so `agent index` / `search_docs` work out of the box.
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_PASSWORD: dev
       POSTGRES_DB: agent

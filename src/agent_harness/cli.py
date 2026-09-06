@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import signal
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any, TypeVar
 from uuid import UUID
 
@@ -16,6 +17,7 @@ from .checkpointer import Checkpointer
 from .config import Settings, get_settings
 from .context import ContextManager
 from .db import get_pool, run_migrations
+from .embeddings import HashEmbeddingClient, VectorStore, VoyageEmbeddingClient
 from .executor import Executor
 from .guardrails import CircuitBreaker, GuardedLLMClient, RateLimiter
 from .llm import AnthropicClient, LLMClient
@@ -71,15 +73,42 @@ def build_llm(settings: Settings) -> LLMClient:
     return GuardedLLMClient(client, RateLimiter(rate=2.0, capacity=5), CircuitBreaker())
 
 
+async def maybe_vector_store(pool: asyncpg.Pool, settings: Settings) -> VectorStore | None:
+    """A ready vector store, or None when pgvector is not installed.
+
+    Returning None means `search_docs` is simply not advertised to the model, which is
+    better than offering a tool whose every call fails.
+    """
+    store = build_vector_store(pool, settings)
+    return store if await store.available() else None
+
+
+def build_vector_store(pool: asyncpg.Pool, settings: Settings) -> VectorStore:
+    """Vector store using Voyage embeddings when a key is set, else local hashing.
+
+    The hash embedder is not semantic, but it keeps retrieval working offline for demos
+    and tests instead of failing outright.
+    """
+    embedder = (
+        VoyageEmbeddingClient(api_key=settings.voyage_api_key, model=settings.embedding_model)
+        if settings.voyage_api_key
+        else HashEmbeddingClient()
+    )
+    return VectorStore(pool, embedder)
+
+
 def build_agent(
     pool: asyncpg.Pool,
     settings: Settings,
     llm: LLMClient | None = None,
     shutdown: asyncio.Event | None = None,
+    vector_store: VectorStore | None = None,
 ) -> tuple[Agent, Checkpointer, Tracer]:
     """Assemble the agent and its collaborators against a live pool."""
     registry = build_registry(
-        shell_timeout=settings.tool_timeout_seconds, http_timeout=settings.tool_timeout_seconds
+        shell_timeout=settings.tool_timeout_seconds,
+        http_timeout=settings.tool_timeout_seconds,
+        vector_store=vector_store,
     )
     configure_tracing(exporter=settings.otel_exporter, endpoint=settings.otel_endpoint or None)
     checkpointer = Checkpointer(pool)
@@ -140,7 +169,10 @@ def run(task: str = typer.Argument(..., help="The task for the agent to perform.
         try:
             await run_migrations(pool)
             agent, checkpointer, _ = build_agent(
-                pool, settings, shutdown=install_shutdown_handler()
+                pool,
+                settings,
+                shutdown=install_shutdown_handler(),
+                vector_store=await maybe_vector_store(pool, settings),
             )
             state = await checkpointer.create_run(task)
             typer.echo(f"run_id: {state.run_id}")
@@ -170,7 +202,10 @@ def resume(run_id: str = typer.Argument(..., help="Run id to continue.")) -> Non
         pool = await get_pool(settings.database_url)
         try:
             agent, checkpointer, _ = build_agent(
-                pool, settings, shutdown=install_shutdown_handler()
+                pool,
+                settings,
+                shutdown=install_shutdown_handler(),
+                vector_store=await maybe_vector_store(pool, settings),
             )
             rid = UUID(run_id)
             try:
@@ -250,6 +285,70 @@ def trace(run_id: str = typer.Argument(..., help="Run id to trace.")) -> None:
             typer.echo(
                 f"run totals: status={totals['status']} steps={totals['step_count']} "
                 f"tokens={totals['total_tokens']} cost=${float(totals['total_cost_usd']):.6f}"
+            )
+        finally:
+            await pool.close()
+
+    _run_async(_main)
+
+
+def _collect_files(paths: list[str], pattern: str) -> tuple[list[Path], list[str]]:
+    """Expand paths into files (blocking; call via a thread)."""
+    files: list[Path] = []
+    skipped: list[str] = []
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir():
+            files.extend(sorted(p for p in path.rglob(pattern) if p.is_file()))
+        elif path.is_file():
+            files.append(path)
+        else:
+            skipped.append(raw)
+    return files, skipped
+
+
+INDEX_PATHS_ARG = typer.Argument(..., help="Files or directories to index.")
+
+
+@app.command()
+def index(
+    paths: list[str] = INDEX_PATHS_ARG,
+    collection: str = typer.Option("default", help="Corpus name to index into."),
+    pattern: str = typer.Option("*", help="Glob filter applied when a path is a directory."),
+) -> None:
+    """Embed files into the vector store so `search_docs` can retrieve them."""
+
+    async def _main() -> None:
+        settings = get_settings()
+        pool = await get_pool(settings.database_url)
+        try:
+            await run_migrations(pool)
+            store = build_vector_store(pool, settings)
+            if not await store.available():
+                typer.echo(
+                    "vector store unavailable: pgvector is not installed on this server.",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+
+            files, skipped = await asyncio.to_thread(_collect_files, paths, pattern)
+            for raw in skipped:
+                typer.echo(f"skipping {raw}: not a file or directory", err=True)
+
+            total_chunks = 0
+            for file in files:
+                try:
+                    text = await asyncio.to_thread(file.read_text, errors="replace")
+                except OSError as exc:
+                    typer.echo(f"skipping {file}: {exc}", err=True)
+                    continue
+                count = await store.index_text(str(file), text, collection=collection)
+                total_chunks += count
+                typer.echo(f"  {file}: {count} chunk(s)")
+
+            typer.echo(
+                f"indexed {len(files)} file(s), {total_chunks} chunk(s) "
+                f"into collection {collection!r}"
             )
         finally:
             await pool.close()

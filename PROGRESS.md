@@ -286,3 +286,32 @@ is coherent," which happened to work but was never a designed behavior.
 - 14 tests covering JSON shape, context nesting/isolation/cleanup, non-serializable
   extras, pausing at a boundary, and — the one that matters — **a paused run resuming
   to completion**.
+
+### §3.3 Retrieval / vector store / RAG — ADDED ✅
+There was no embedding step, no vector store, and no retrieval tool at all.
+- **pgvector in the existing Postgres**, not a separate vector database: the harness
+  already depends on Postgres for durability, so retrieval adds no new infrastructure
+  and a chunk's embedding is written transactionally beside its text.
+- Migration `003_vector_store.sql`: a `documents` table (`vector(1024)`, matching
+  voyage-3) with an **HNSW** index (better recall than IVFFlat at these corpus sizes and
+  no training step, so an index exists from the first insert). The migration degrades
+  gracefully — if pgvector is absent it logs a notice and skips, leaving the rest of the
+  harness working.
+- New `embeddings.py`: an `EmbeddingClient` Protocol mirroring `LLMClient`, with
+  `VoyageEmbeddingClient` (real, batched, index-sorted against silent misalignment) and
+  `HashEmbeddingClient` (deterministic, offline, so the retrieval *plumbing* is testable
+  without an API key). Plus `chunk_text` (overlapping, prefers line/paragraph
+  boundaries) and a `VectorStore` doing index/search/count/clear.
+- New `search_docs` tool, registered **only when a store is available** — a deployment
+  without pgvector simply does not advertise retrieval rather than offering a tool whose
+  every call fails.
+- New `agent index <paths>` CLI command, with file walking and reads pushed to threads
+  (ruff's ASYNC240 caught blocking `pathlib` calls in the coroutine).
+- Re-indexing a source **replaces** its chunks, so an edited file leaves no stale chunks
+  that still match queries.
+- **Verified against a real pgvector 0.8.6 server** (`pgvector/pgvector:pg17` on :5433):
+  indexed the fixture repo, and semantic queries ranked correctly — "discount percent
+  calculation" → `calculator.py`, "slugify unicode punctuation" → `notes.py`.
+- 24 tests; on a plain Postgres without the extension, 14 still run and 10 skip cleanly
+  (**209 passed, 10 skipped**). CI and docker-compose now use the pgvector image so the
+  retrieval tests actually execute there.

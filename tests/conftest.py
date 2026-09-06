@@ -62,3 +62,32 @@ async def db_pool() -> AsyncIterator[object]:
 @pytest.fixture
 def run_id() -> str:
     return str(uuid4())
+
+
+VECTOR_DB_URL = os.environ.get("TEST_VECTOR_DATABASE_URL", DB_URL)
+
+
+@pytest_asyncio.fixture
+async def vector_pool() -> AsyncIterator[object]:
+    """A pool against a pgvector-enabled database; skips when the extension is absent.
+
+    Retrieval is optional, so its tests must not fail a run on a plain Postgres. Start a
+    capable server with:
+        docker run -d -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=agent \
+            -p 5433:5432 pgvector/pgvector:pg17
+        TEST_VECTOR_DATABASE_URL=postgres://postgres:dev@localhost:5433/agent
+    """
+    try:
+        pool = await get_pool(VECTOR_DB_URL)
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"postgres unavailable at {VECTOR_DB_URL}: {exc}")
+    try:
+        await run_migrations(pool)
+        has_vector = await pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')"
+        )
+        if not has_vector:
+            pytest.skip("pgvector extension not installed on this server")
+        yield pool
+    finally:
+        await pool.close()
