@@ -426,3 +426,24 @@ The harness ran exactly one agent with no delegation of any kind.
   bounded allowance so delegation cannot be used to escape the run budget.
 - 8 tests, including cost rolling up across the tree and a parent delegating through the
   ordinary tool-call path.
+
+### §3.2 Eval grading was bare substring matching — UPGRADED ✅
+Grading returned a single boolean from case-insensitive substring checks, so a failing
+eval was opaque ("something was wrong") and criteria that are not lexical could not be
+expressed at all.
+- `EvalTask` now supports **regex** criteria (shapes substrings cannot express, e.g.
+  `1\s+failed`), **numeric with tolerance** (`8080`, `port 8080`, and `port 8,080` all
+  pass; `8081` does not — impossible with substring matching), plus the original
+  contains/absent, and **`rubric`**: a natural-language criterion graded by an
+  **LLM judge** for answers whose correctness is not lexical.
+- Grading returns a `GradeResult` carrying **which criteria failed** and a **partial-
+  credit score**, so a regression is diagnosable rather than merely visible. Demonstrated:
+  the sabotaged agent now reports `["missing 'apply_discount'", "no match for /(?:/|by)\s*100/"]`
+  instead of just FAIL.
+- The judge is asked for a bare verdict token, so parsing is not fooled by an
+  explanation containing the opposite word (there is a test for exactly that).
+- Rubrics are **skipped when no judge is configured**, so the set stays runnable offline;
+  `agent eval --judge` opts in.
+- Task set grew to 7, now tagged and using the full range of criteria types.
+- 20 new tests. Deliberately did **not** take a Ragas/DeepEval dependency — see
+  `DESIGN_DECISIONS.md` for why.

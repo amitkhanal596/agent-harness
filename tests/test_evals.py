@@ -38,7 +38,13 @@ def _settings() -> Settings:
 def test_task_set_has_at_least_five_labeled_tasks() -> None:
     tasks = load_tasks(TASKS_FILE)
     assert len(tasks) >= 5
-    assert all(t.id and t.task and t.expect_contains for t in tasks)
+    # Every task must be labelled, though not necessarily with substring criteria —
+    # regex, numeric, and rubric criteria are all valid labels.
+    assert all(t.id and t.task for t in tasks)
+    assert all(
+        t.expect_contains or t.expect_regex or t.expect_number is not None or t.rubric
+        for t in tasks
+    )
 
 
 def test_grading_is_substring_and_case_insensitive() -> None:

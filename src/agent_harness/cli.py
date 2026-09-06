@@ -445,14 +445,22 @@ def eval_command(
     mock: bool = typer.Option(
         False, "--mock", help="Use the scripted offline model instead of the API."
     ),
+    judge: bool = typer.Option(
+        False, "--judge",
+        help="Grade `rubric` criteria with an LLM judge (needs ANTHROPIC_API_KEY).",
+    ),
 ) -> None:
     """Run the eval set headlessly and print pass rate, avg cost, and avg latency."""
     from .evals_runner import ScriptedFixtureLLM, run_eval_set
 
     async def _main() -> None:
         client = ScriptedFixtureLLM() if mock else None
+        settings = get_settings()
+        judge_client = build_llm(settings) if judge else None
         try:
-            report: dict[str, Any] = await run_eval_set(tasks, limit=limit or None, llm=client)
+            report: dict[str, Any] = await run_eval_set(
+                tasks, limit=limit or None, llm=client, judge=judge_client
+            )
         except RuntimeError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from None
