@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 from uuid import UUID
@@ -10,7 +11,7 @@ from uuid import UUID
 import asyncpg
 import typer
 
-from .agent import Agent, BudgetExceeded, MaxStepsExceeded
+from .agent import Agent, BudgetExceeded, MaxStepsExceeded, RunPaused
 from .checkpointer import Checkpointer
 from .config import Settings, get_settings
 from .context import ContextManager
@@ -18,17 +19,42 @@ from .db import get_pool, run_migrations
 from .executor import Executor
 from .guardrails import CircuitBreaker, GuardedLLMClient, RateLimiter
 from .llm import AnthropicClient, LLMClient
+from .logging import configure_logging
 from .otel import configure_tracing
 from .tools import build_registry
 from .tracer import Tracer
 
 app = typer.Typer(help="Durable, observable agent-execution engine.", no_args_is_help=True)
 
+
+@app.callback()
+def _bootstrap() -> None:
+    """Configure logging before any command runs, so every entrypoint is instrumented."""
+    settings = get_settings()
+    configure_logging(level=settings.log_level, json_format=settings.log_json)
+
 T = TypeVar("T")
 
 
 def _run_async(coro_factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
     return asyncio.run(coro_factory())
+
+
+def install_shutdown_handler() -> asyncio.Event:
+    """An Event set on SIGINT/SIGTERM so the loop can stop at a step boundary.
+
+    Signal handlers are installed on the running loop, so this must be called from
+    inside the coroutine. Platforms without `add_signal_handler` (Windows) fall back to
+    an event that simply never fires; the run then behaves as it did before.
+    """
+    event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, event.set)
+        except (NotImplementedError, RuntimeError):  # pragma: no cover - platform dependent
+            pass
+    return event
 
 
 def build_llm(settings: Settings) -> LLMClient:
@@ -46,7 +72,10 @@ def build_llm(settings: Settings) -> LLMClient:
 
 
 def build_agent(
-    pool: asyncpg.Pool, settings: Settings, llm: LLMClient | None = None
+    pool: asyncpg.Pool,
+    settings: Settings,
+    llm: LLMClient | None = None,
+    shutdown: asyncio.Event | None = None,
 ) -> tuple[Agent, Checkpointer, Tracer]:
     """Assemble the agent and its collaborators against a live pool."""
     registry = build_registry(
@@ -71,6 +100,7 @@ def build_agent(
             max_tokens=settings.max_context_tokens,
             keep_recent_messages=settings.keep_recent_messages,
         ),
+        shutdown=shutdown,
     )
     return agent, checkpointer, tracer
 
@@ -109,11 +139,16 @@ def run(task: str = typer.Argument(..., help="The task for the agent to perform.
         pool = await get_pool(settings.database_url)
         try:
             await run_migrations(pool)
-            agent, checkpointer, _ = build_agent(pool, settings)
+            agent, checkpointer, _ = build_agent(
+                pool, settings, shutdown=install_shutdown_handler()
+            )
             state = await checkpointer.create_run(task)
             typer.echo(f"run_id: {state.run_id}")
             try:
                 answer = await agent.run(state)
+            except RunPaused as exc:
+                typer.echo(f"\n{exc}", err=True)
+                raise typer.Exit(code=130) from None
             except (BudgetExceeded, MaxStepsExceeded) as exc:
                 await checkpointer.mark_failed(state.run_id, str(exc))
                 typer.echo(f"run failed: {exc}", err=True)
@@ -134,10 +169,15 @@ def resume(run_id: str = typer.Argument(..., help="Run id to continue.")) -> Non
         settings = get_settings()
         pool = await get_pool(settings.database_url)
         try:
-            agent, checkpointer, _ = build_agent(pool, settings)
+            agent, checkpointer, _ = build_agent(
+                pool, settings, shutdown=install_shutdown_handler()
+            )
             rid = UUID(run_id)
             try:
                 answer = await agent.resume(rid)
+            except RunPaused as exc:
+                typer.echo(f"\n{exc}", err=True)
+                raise typer.Exit(code=130) from None
             except (BudgetExceeded, MaxStepsExceeded) as exc:
                 await checkpointer.mark_failed(rid, str(exc))
                 typer.echo(f"run failed: {exc}", err=True)

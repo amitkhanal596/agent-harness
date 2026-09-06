@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     keep_recent_messages: int = 8
     otel_exporter: str = "none"
     otel_endpoint: str = ""
+    log_level: str = "INFO"
+    log_json: bool = True
 
     @field_validator("*", mode="before")
     @classmethod

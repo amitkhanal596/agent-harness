@@ -256,3 +256,33 @@ schema.
   in-memory exporter (not just "it didn't raise"), including a cross-check that span
   counts match the `run_events` rows. Verified live with the console exporter: all 8
   `gen_ai.*` attributes present on a real run.
+
+### §2.10 Structured logging with correlation — ADDED ✅
+The only log line in the whole codebase was one `logger.debug` in the retry path. Trace
+data lived exclusively in Postgres, so there was no way to tail a run in flight and no
+debugging path at all when the database itself was the broken thing.
+- New `logging.py`: `JsonFormatter` (one JSON object per line on **stderr**, so stdout
+  stays clean for pipeable CLI output), `configure_logging()`, and `log_context()`.
+- Correlation rides in a `ContextVar`, so `run_id`/`step` attach to every record without
+  threading them through call signatures — and, being a ContextVar, it stays correct
+  across `await` boundaries and concurrent runs (there is a test for exactly that).
+- The loop now logs run start/completion, every model call (latency, tokens, cost,
+  stop reason), every tool call (name, latency, error), budget trips, and cap hits.
+- Configured from a Typer `@app.callback()` so **every** command is instrumented — an
+  earlier placement inside `build_agent` silently left `agent eval` and `agent trace`
+  logging nothing, which testing caught.
+- Verified live: `agent eval --mock` emits correlated JSON lines carrying `run_id`,
+  `step`, `latency_ms`, and `cost_usd`.
+
+### §2.4 Graceful shutdown — ADDED ✅
+There was no SIGTERM handling: durability rested on "crash and hope the last checkpoint
+is coherent," which happened to work but was never a designed behavior.
+- `Agent` accepts an optional `asyncio.Event`; the loop checks it **at step boundaries
+  only**, so the checkpoint it saves is always a coherent state with no half-applied
+  step — a mid-tool interrupt could not offer that guarantee.
+- New `RunPaused` exception with `status="paused"` persisted and the exact
+  `agent resume <run_id>` command in the message. The CLI installs SIGINT/SIGTERM
+  handlers and exits 130.
+- 14 tests covering JSON shape, context nesting/isolation/cleanup, non-serializable
+  extras, pausing at a boundary, and — the one that matters — **a paused run resuming
+  to completion**.

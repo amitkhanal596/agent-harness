@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Protocol
 from uuid import UUID
@@ -9,8 +10,11 @@ from uuid import UUID
 from .context import CompactionResult, ContextManager
 from .executor import Executor
 from .llm import LLMClient, cost_usd
+from .logging import get_logger, log_context
 from .models import Completion, Message, State, ToolResult
 from .tools.base import Registry
+
+logger = get_logger(__name__)
 
 
 class BudgetExceeded(Exception):
@@ -19,6 +23,13 @@ class BudgetExceeded(Exception):
 
 class MaxStepsExceeded(Exception):
     """The run hit its iteration cap without producing a final answer."""
+
+
+class RunPaused(Exception):
+    """The run stopped cleanly at a step boundary because shutdown was requested.
+
+    The checkpoint is coherent, so `agent resume <run_id>` continues from it.
+    """
 
 
 class SupportsCheckpoint(Protocol):
@@ -79,6 +90,7 @@ class Agent:
         max_steps: int = 25,
         budget_usd: float = 1.00,
         context: ContextManager | None = None,
+        shutdown: asyncio.Event | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -88,6 +100,7 @@ class Agent:
         self.max_steps = max_steps
         self.budget_usd = budget_usd
         self.context = context
+        self._shutdown = shutdown
         self.total_cost_usd = 0.0
         self.last_compaction: CompactionResult | None = None
 
@@ -95,50 +108,105 @@ class Agent:
         """Run the loop until the model answers, the budget trips, or the cap is hit."""
         specs = self.registry.specs()
 
-        while state.step_count < self.max_steps:
-            t0 = time.perf_counter()
-            comp = await self.llm.complete(self._prompt_messages(state), specs)
-            latency_ms = int((time.perf_counter() - t0) * 1000)
-            step_cost = cost_usd(comp.prompt_tokens, comp.output_tokens)
-            await self.tracer.llm(state, comp, latency_ms=latency_ms, cost_usd=step_cost)
+        with log_context(run_id=str(state.run_id)):
+            logger.info("run started", extra={"task": state.task[:200],
+                                              "from_step": state.step_count})
+            while state.step_count < self.max_steps:
+                if self._shutdown is not None and self._shutdown.is_set():
+                    return await self._pause(state)
 
-            self.total_cost_usd += step_cost
-            if self.total_cost_usd > self.budget_usd:
-                state.status = "failed"
-                await self.checkpointer.save(state)
-                raise BudgetExceeded(
-                    f"run cost ${self.total_cost_usd:.6f} exceeds budget "
-                    f"${self.budget_usd:.6f}"
-                )
+                with log_context(step=state.step_count):
+                    t0 = time.perf_counter()
+                    comp = await self.llm.complete(self._prompt_messages(state), specs)
+                    latency_ms = int((time.perf_counter() - t0) * 1000)
+                    step_cost = cost_usd(comp.prompt_tokens, comp.output_tokens)
+                    await self.tracer.llm(
+                        state, comp, latency_ms=latency_ms, cost_usd=step_cost
+                    )
+                    logger.info(
+                        "llm call",
+                        extra={
+                            "latency_ms": latency_ms,
+                            "prompt_tokens": comp.prompt_tokens,
+                            "output_tokens": comp.output_tokens,
+                            "cost_usd": round(step_cost, 6),
+                            "stop_reason": comp.stop_reason,
+                            "tool_calls": len(comp.tool_calls),
+                        },
+                    )
 
-            if not comp.tool_calls:
-                state.messages.append(Message(role="assistant", content=comp.text))
-                state.status = "completed"
-                await self.checkpointer.save(state)
-                return comp.text
+                    self.total_cost_usd += step_cost
+                    if self.total_cost_usd > self.budget_usd:
+                        state.status = "failed"
+                        await self.checkpointer.save(state)
+                        logger.error(
+                            "budget exceeded",
+                            extra={"spent_usd": round(self.total_cost_usd, 6),
+                                   "budget_usd": self.budget_usd},
+                        )
+                        raise BudgetExceeded(
+                            f"run cost ${self.total_cost_usd:.6f} exceeds budget "
+                            f"${self.budget_usd:.6f}"
+                        )
 
-            state.messages.append(
-                Message(role="assistant", content=comp.text, tool_calls=comp.tool_calls)
-            )
-            t1 = time.perf_counter()
-            results = await self.executor.run_all(comp.tool_calls)
-            tool_latency_ms = int((time.perf_counter() - t1) * 1000)
+                    if not comp.tool_calls:
+                        state.messages.append(Message(role="assistant", content=comp.text))
+                        state.status = "completed"
+                        await self.checkpointer.save(state)
+                        logger.info("run completed",
+                                    extra={"steps": state.step_count,
+                                           "cost_usd": round(self.total_cost_usd, 6)})
+                        return comp.text
 
-            for result, call in zip(results, comp.tool_calls, strict=True):
-                content = result.output if result.error is None else f"ERROR: {result.error}"
-                state.messages.append(
-                    Message(role="tool", content=content, tool_call_id=result.call_id)
-                )
-                await self.tracer.tool(
-                    state, result, tool_name=call.name, latency_ms=tool_latency_ms
-                )
+                    state.messages.append(
+                        Message(role="assistant", content=comp.text,
+                                tool_calls=comp.tool_calls)
+                    )
+                    t1 = time.perf_counter()
+                    results = await self.executor.run_all(comp.tool_calls)
+                    tool_latency_ms = int((time.perf_counter() - t1) * 1000)
 
-            state.step_count += 1
+                    for result, call in zip(results, comp.tool_calls, strict=True):
+                        content = (
+                            result.output if result.error is None
+                            else f"ERROR: {result.error}"
+                        )
+                        state.messages.append(
+                            Message(role="tool", content=content,
+                                    tool_call_id=result.call_id)
+                        )
+                        await self.tracer.tool(
+                            state, result, tool_name=call.name, latency_ms=tool_latency_ms
+                        )
+                        logger.info(
+                            "tool call",
+                            extra={"tool": call.name, "call_id": result.call_id,
+                                   "latency_ms": tool_latency_ms,
+                                   "error": result.error},
+                        )
+
+                    state.step_count += 1
+                    await self.checkpointer.save(state)
+
+            state.status = "failed"
             await self.checkpointer.save(state)
+            logger.error("max steps exceeded", extra={"max_steps": self.max_steps})
+            raise MaxStepsExceeded(
+                f"run hit the {self.max_steps}-step cap without finishing"
+            )
 
-        state.status = "failed"
+    async def _pause(self, state: State) -> str:
+        """Checkpoint and stop cleanly at a step boundary on shutdown request.
+
+        Pausing between steps (rather than mid-tool) means the saved checkpoint is
+        always a coherent state that `resume` can pick up, with no half-applied step.
+        """
+        state.status = "paused"
         await self.checkpointer.save(state)
-        raise MaxStepsExceeded(f"run hit the {self.max_steps}-step cap without finishing")
+        logger.warning("run paused for shutdown", extra={"step": state.step_count})
+        raise RunPaused(
+            f"run paused at step {state.step_count}; resume with: agent resume {state.run_id}"
+        )
 
     def _prompt_messages(self, state: State) -> list[Message]:
         """The messages to send this iteration, compacted to fit the context window.
