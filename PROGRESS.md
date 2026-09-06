@@ -57,3 +57,24 @@ milestone's own acceptance checks.
   loop continues to a final answer; a tool failing twice then succeeding is retried
   (3 attempts, `succeeded`); a never-stopping MockLLMClient trips `MaxStepsExceeded`
   exactly at the cap. Backoff delays asserted as [0.1, 0.2, 0.4]. 47 tests pass.
+
+### M4 — Durable execution ✅
+- `checkpointer.py`: `create_run` / `save` (upsert on `(run_id, step_number)` + run
+  summary refresh) / `latest` / `list_steps` / `mark_failed`, with write latencies
+  recorded for the §9 metrics.
+- Loop checkpoints after every iteration and on every exit path; `Agent.resume(run_id)`
+  reloads the newest checkpoint; `agent replay <run_id>` added.
+- Acceptance (against real Postgres): golden test — a run crashed after step 2 and then
+  resumed reaches byte-identical messages, step count, and status as an uninterrupted
+  run. `agent replay` prints each checkpoint's step and message count in order
+  (0/1 msg → 1/3 msgs → 2/6 msgs). Re-saving the same step number upserts, no error.
+
+### M5 — Observability ✅
+- `tracer.py`: one `run_events` row per model call and per tool call, run-level
+  `total_tokens` / `total_cost_usd` accumulated on `agent_runs`, plus `timeline()` and
+  `totals()` read helpers.
+- `agent trace <run_id>` prints a per-event table (step, kind, tool, latency, tokens,
+  cost, error) and both event-sum and persisted run totals.
+- Acceptance: after a 2-step run `run_events` holds exactly one `llm_call` per step plus
+  one `tool_call` per tool; `agent trace` event totals equal the persisted run totals
+  (verified live: 5 events, 4325 tokens, $0.014475 both ways).
