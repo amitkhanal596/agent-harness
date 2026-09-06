@@ -360,3 +360,34 @@ their own bucket, making the real aggregate rate N× the configured one.
   and no oversubscription (20 racing claims on a 5-token bucket grant at most 5).
 - Kept ruff's ASYNC110 suppressed with a written justification: the poll loop waits on
   *other processes* releasing capacity, which an in-process `asyncio.Event` cannot see.
+
+### §2.8 Only one provider — ADDED a second, proving the abstraction holds ✅
+`LLMClient` was a Protocol with exactly one implementation, so "swappable" was an
+untested claim, and Anthropic's vocabulary leaked into what was meant to be neutral.
+- New `providers.py` with `OpenAIClient`, which differs from Anthropic in every way
+  that matters: tools nested in a `function` envelope; a **real `tool` role** (so results
+  are *not* grouped into a synthetic user turn — the mirror image of the Anthropic
+  mapping); tool arguments as a **JSON string** to parse; `prompt_tokens`/
+  `completion_tokens` instead of `input`/`output`; different finish reasons, normalised
+  back to the internal vocabulary.
+- Malformed tool arguments become `{}` so schema validation reports a tool error rather
+  than the client crashing.
+- Its own pricing constants — cost accounting is per-provider, not hardcoded to one.
+- Also reaches llama.cpp / vLLM / Ollama / Together via `base_url`.
+- The decisive test: **the loop runs unchanged on `OpenAIClient`**, completing a
+  tool-using run end to end. That is what turns "there is a Protocol" into "the
+  abstraction actually holds".
+
+### §2.9 No streaming — ADDED ✅
+Every call was a single blocking round-trip, so the harness had never dealt with the
+genuinely hard part: assembling tool calls across chunks.
+- `StreamingLLMClient` is a **separate Protocol** extending `LLMClient`, not a flag on
+  `complete`: the loop needs a finished `Completion` before it can execute tools, so
+  most of the harness should not care. Only callers that want early output depend on the
+  narrower type.
+- `AnthropicClient.stream()` is an async context manager yielding text deltas live,
+  while the complete `Completion` — including fully-assembled tool calls — lands in
+  `last_stream`. **A partially-received `tool_use` is never surfaced**, because the loop
+  acting on half a tool call would be worse than waiting.
+- 15 tests across both items, including streaming that assembles a tool call correctly
+  and produces a `Completion` of exactly the shape the loop already consumes.

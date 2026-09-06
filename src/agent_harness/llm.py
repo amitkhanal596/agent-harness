@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, Protocol, cast
 
 from anthropic import AsyncAnthropic
@@ -23,6 +25,21 @@ class LLMClient(Protocol):
     """Anything that can turn conversation state plus tools into a Completion."""
 
     async def complete(self, messages: list[Message], tools: list[ToolSpec]) -> Completion:
+        ...
+
+
+class StreamingLLMClient(LLMClient, Protocol):
+    """An `LLMClient` that can also deliver text incrementally.
+
+    Streaming is a separate Protocol rather than a flag on `complete` because most of
+    the harness does not care: the loop needs a finished `Completion` before it can
+    execute tools. Callers that *do* want tokens early (a UI, a CLI writing as it goes)
+    depend on this narrower type.
+    """
+
+    def stream(
+        self, messages: list[Message], tools: list[ToolSpec]
+    ) -> AbstractAsyncContextManager[AsyncIterator[str]]:
         ...
 
 
@@ -91,6 +108,8 @@ class AnthropicClient:
         self._model = model
         self._max_tokens = max_tokens
         self._cache_prompt = cache_prompt
+        #: The Completion assembled by the most recent `stream()` call.
+        self.last_stream: Completion | None = None
 
     def _tool_payload(self, tools: list[ToolSpec]) -> list[dict[str, Any]]:
         """Tool definitions, with a cache breakpoint on the last one when caching is on.
@@ -124,4 +143,43 @@ class AnthropicClient:
             stop_reason=resp.stop_reason or "",
             prompt_tokens=resp.usage.input_tokens,
             output_tokens=resp.usage.output_tokens,
+        )
+
+    @asynccontextmanager
+    async def stream(
+        self, messages: list[Message], tools: list[ToolSpec]
+    ) -> AsyncIterator[AsyncIterator[str]]:
+        """Yield text deltas as they arrive; the full Completion lands in `last_stream`.
+
+        Tool-call blocks are assembled across chunks by the SDK's stream helper, so a
+        partially-received `tool_use` is never surfaced — the loop must not act on half
+        a tool call. Text deltas are yielded live for callers that want early output.
+        """
+        async with self._client.messages.stream(
+            model=self._model,
+            max_tokens=self._max_tokens,
+            tools=cast(Any, self._tool_payload(tools)),
+            messages=cast(Any, to_anthropic_messages(messages)),
+        ) as stream:
+
+            async def deltas() -> AsyncIterator[str]:
+                async for chunk in stream.text_stream:
+                    yield chunk
+
+            yield deltas()
+            final = await stream.get_final_message()
+
+        text = ""
+        calls: list[ToolCall] = []
+        for block in final.content:
+            if block.type == "text":
+                text += block.text
+            elif block.type == "tool_use":
+                calls.append(ToolCall(id=block.id, name=block.name, input=dict(block.input)))
+        self.last_stream = Completion(
+            text=text,
+            tool_calls=calls,
+            stop_reason=final.stop_reason or "",
+            prompt_tokens=final.usage.input_tokens,
+            output_tokens=final.usage.output_tokens,
         )
