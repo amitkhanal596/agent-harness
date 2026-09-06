@@ -338,3 +338,25 @@ previous instructions" was fed to the model as-is.
 - Honest about limits: both passes are heuristic defence-in-depth behind the real
   controls (the `run_shell` allowlist, the non-root container user, the budget cap).
   The module docstring says so rather than overclaiming.
+
+### §2.2 Guardrails were in-process only — ADDED distributed versions ✅
+The `RateLimiter` and `CircuitBreaker` were plain Python objects: a restart forgot an
+open breaker (so every new pod re-probed a downed provider), and N workers each got
+their own bucket, making the real aggregate rate N× the configured one.
+- Migration `004_guardrails.sql` adds `circuit_breakers` and `rate_limit_buckets`.
+  **Postgres, not Redis** — it is already the durability store, so the shared state adds
+  no new infrastructure, which matches the choice made for retrieval.
+- `DistributedRateLimiter`: one row per bucket, claimed under `SELECT ... FOR UPDATE`.
+  Refill is computed from elapsed time on read, so there is no background job.
+- `DistributedCircuitBreaker`: increment-and-trip happen in **one SQL statement**, so
+  concurrent workers cannot each read the same count and skip past the threshold.
+- `DistributedGuardedLLMClient` keeps the same contract as the in-process version.
+- Opt-in via `DISTRIBUTED_GUARDRAILS=true`; the in-process versions remain the default
+  since they are correct (and cheaper — no round-trip per call) for a single worker.
+- 15 tests, including the two that matter: **breaker state survives a "restart"** (a
+  fresh instance with no in-memory history still sees the circuit open) and **the bucket
+  is shared across instances** (two workers draw from one budget, not one each). Plus
+  concurrency tests asserting no lost updates (10 racing failures → count is exactly 10)
+  and no oversubscription (20 racing claims on a 5-token bucket grant at most 5).
+- Kept ruff's ASYNC110 suppressed with a written justification: the poll loop waits on
+  *other processes* releasing capacity, which an in-process `asyncio.Event` cannot see.

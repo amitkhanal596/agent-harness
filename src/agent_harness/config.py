@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     log_json: bool = True
     voyage_api_key: str = ""
     embedding_model: str = "voyage-3"
+    distributed_guardrails: bool = False
+    rate_limit_per_second: float = 2.0
+    rate_limit_burst: float = 5.0
+    breaker_threshold: int = 5
+    breaker_reset_seconds: float = 30.0
 
     @field_validator("*", mode="before")
     @classmethod

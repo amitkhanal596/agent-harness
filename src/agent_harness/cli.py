@@ -19,7 +19,14 @@ from .context import ContextManager
 from .db import get_pool, run_migrations
 from .embeddings import HashEmbeddingClient, VectorStore, VoyageEmbeddingClient
 from .executor import Executor
-from .guardrails import CircuitBreaker, GuardedLLMClient, RateLimiter
+from .guardrails import (
+    CircuitBreaker,
+    DistributedCircuitBreaker,
+    DistributedGuardedLLMClient,
+    DistributedRateLimiter,
+    GuardedLLMClient,
+    RateLimiter,
+)
 from .llm import AnthropicClient, LLMClient
 from .logging import configure_logging
 from .otel import configure_tracing
@@ -59,8 +66,13 @@ def install_shutdown_handler() -> asyncio.Event:
     return event
 
 
-def build_llm(settings: Settings) -> LLMClient:
-    """Build the guarded Anthropic client from settings."""
+def build_llm(settings: Settings, pool: asyncpg.Pool | None = None) -> LLMClient:
+    """Build the guarded Anthropic client from settings.
+
+    With `DISTRIBUTED_GUARDRAILS=true` and a pool, the limiter and breaker share state
+    through Postgres so the limits hold across restarts and across workers; otherwise
+    they are per-process, which is correct only for a single-worker deployment.
+    """
     if not settings.anthropic_api_key:
         typer.echo("ANTHROPIC_API_KEY is not set (put it in .env)", err=True)
         raise typer.Exit(code=2)
@@ -70,7 +82,27 @@ def build_llm(settings: Settings) -> LLMClient:
         base_url=settings.anthropic_base_url or None,
         cache_prompt=settings.cache_prompt,
     )
-    return GuardedLLMClient(client, RateLimiter(rate=2.0, capacity=5), CircuitBreaker())
+    if settings.distributed_guardrails and pool is not None:
+        return DistributedGuardedLLMClient(
+            client,
+            DistributedRateLimiter(
+                pool, name="llm",
+                rate=settings.rate_limit_per_second,
+                capacity=settings.rate_limit_burst,
+            ),
+            DistributedCircuitBreaker(
+                pool, name="llm",
+                threshold=settings.breaker_threshold,
+                reset_after=settings.breaker_reset_seconds,
+            ),
+        )
+    return GuardedLLMClient(
+        client,
+        RateLimiter(rate=settings.rate_limit_per_second, capacity=settings.rate_limit_burst),
+        CircuitBreaker(
+            threshold=settings.breaker_threshold, reset_after=settings.breaker_reset_seconds
+        ),
+    )
 
 
 async def maybe_vector_store(pool: asyncpg.Pool, settings: Settings) -> VectorStore | None:
@@ -114,7 +146,7 @@ def build_agent(
     checkpointer = Checkpointer(pool)
     tracer = Tracer(pool, model=settings.model)
     agent = Agent(
-        llm=llm or build_llm(settings),
+        llm=llm or build_llm(settings, pool),
         registry=registry,
         executor=Executor(
             registry,

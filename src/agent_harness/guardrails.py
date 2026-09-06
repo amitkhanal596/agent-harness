@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+import asyncpg
+
 from .models import Completion, Message, ToolSpec
 
 
@@ -128,4 +130,202 @@ class GuardedLLMClient:
             self.breaker.record_failure()
             raise
         self.breaker.record_success()
+        return completion
+
+
+class DistributedRateLimiter:
+    """Token bucket shared across processes via Postgres.
+
+    The in-process `RateLimiter` gives each worker its own bucket, so N workers hit the
+    provider at N times the configured rate. This one keeps a single row per bucket and
+    takes a row lock to claim tokens, so the limit holds for the fleet.
+
+    Refill is computed from elapsed time on each read, so there is no background job.
+    Every claim costs a round-trip; use the in-process limiter when one worker is the
+    whole deployment.
+    """
+
+    def __init__(
+        self, pool: asyncpg.Pool, name: str, rate: float, capacity: float
+    ) -> None:
+        if rate <= 0 or capacity <= 0:
+            raise ValueError("rate and capacity must be positive")
+        self._pool = pool
+        self.name = name
+        self.rate = rate
+        self.capacity = capacity
+
+    async def try_acquire(self, tokens: float = 1.0) -> bool:
+        """Claim `tokens` if available. Returns False rather than waiting."""
+        if tokens > self.capacity:
+            raise ValueError("requested more tokens than the bucket can hold")
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT tokens, updated_at FROM rate_limit_buckets"
+                    " WHERE name = $1 FOR UPDATE",
+                    self.name,
+                )
+                if row is None:
+                    # First use: start full, minus what this call takes.
+                    await conn.execute(
+                        "INSERT INTO rate_limit_buckets (name, tokens) VALUES ($1, $2)"
+                        " ON CONFLICT (name) DO NOTHING",
+                        self.name,
+                        self.capacity - tokens,
+                    )
+                    return True
+
+                elapsed = await conn.fetchval(
+                    "SELECT EXTRACT(EPOCH FROM (now() - $1::timestamptz))", row["updated_at"]
+                )
+                available = min(self.capacity, row["tokens"] + float(elapsed) * self.rate)
+                if available < tokens:
+                    return False
+                await conn.execute(
+                    "UPDATE rate_limit_buckets SET tokens = $2, updated_at = now()"
+                    " WHERE name = $1",
+                    self.name,
+                    available - tokens,
+                )
+                return True
+
+    async def acquire(self, tokens: float = 1.0, poll_interval: float = 0.05) -> None:
+        """Wait until `tokens` can be claimed.
+
+        Polls rather than waiting on an event: the tokens are replenished by the passage
+        of time and by *other processes* releasing capacity, neither of which an
+        in-process `asyncio.Event` can observe. (Postgres LISTEN/NOTIFY could, but that
+        is a heavier dependency than this contention profile justifies.)
+        """
+        while not await self.try_acquire(tokens):  # noqa: ASYNC110 - cross-process wait
+            await asyncio.sleep(poll_interval)
+
+
+class DistributedCircuitBreaker:
+    """Circuit breaker whose state lives in Postgres, shared by every worker.
+
+    The in-process breaker forgets it was open whenever the process restarts, so a
+    provider outage gets re-probed by every new pod. This one persists the state, so the
+    fleet fails fast together and recovers together.
+    """
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        name: str = "llm",
+        threshold: int = 5,
+        reset_after: float = 30.0,
+    ) -> None:
+        if threshold < 1:
+            raise ValueError("threshold must be >= 1")
+        self._pool = pool
+        self.name = name
+        self.threshold = threshold
+        self.reset_after = reset_after
+
+    async def state(self) -> str:
+        """Current breaker state, resolving an elapsed cooldown to half-open."""
+        row = await self._pool.fetchrow(
+            "SELECT state, opened_at,"
+            " EXTRACT(EPOCH FROM (now() - opened_at)) AS since_open"
+            " FROM circuit_breakers WHERE name = $1",
+            self.name,
+        )
+        if row is None or row["state"] != self.OPEN:
+            return str(row["state"]) if row else self.CLOSED
+        if row["since_open"] is not None and float(row["since_open"]) >= self.reset_after:
+            return self.HALF_OPEN
+        return self.OPEN
+
+    async def before_call(self) -> None:
+        """Raise `CircuitOpen` while the breaker is open and cooling down."""
+        current = await self.state()
+        if current == self.OPEN:
+            row = await self._pool.fetchrow(
+                "SELECT failures, EXTRACT(EPOCH FROM (now() - opened_at)) AS since_open"
+                " FROM circuit_breakers WHERE name = $1",
+                self.name,
+            )
+            remaining = self.reset_after - float(row["since_open"] or 0)
+            raise CircuitOpen(
+                f"circuit {self.name!r} open after {row['failures']} consecutive "
+                f"failures; retry in {remaining:.1f}s"
+            )
+
+    async def record_success(self) -> None:
+        """Close the breaker and clear the failure count."""
+        await self._pool.execute(
+            """
+            INSERT INTO circuit_breakers (name, state, failures, opened_at, updated_at)
+            VALUES ($1, 'closed', 0, NULL, now())
+            ON CONFLICT (name) DO UPDATE
+               SET state = 'closed', failures = 0, opened_at = NULL, updated_at = now()
+            """,
+            self.name,
+        )
+
+    async def record_failure(self) -> None:
+        """Count a failure, tripping the breaker open at the threshold.
+
+        The increment and the threshold check happen in one statement under a row lock,
+        so concurrent workers cannot each read the same count and skip past the trip.
+        """
+        await self._pool.execute(
+            """
+            INSERT INTO circuit_breakers (name, state, failures, opened_at, updated_at)
+            VALUES ($1, CASE WHEN 1 >= $2 THEN 'open' ELSE 'closed' END, 1,
+                    CASE WHEN 1 >= $2 THEN now() ELSE NULL END, now())
+            ON CONFLICT (name) DO UPDATE
+               SET failures = circuit_breakers.failures + 1,
+                   state = CASE
+                       WHEN circuit_breakers.failures + 1 >= $2 THEN 'open'
+                       ELSE circuit_breakers.state
+                   END,
+                   opened_at = CASE
+                       WHEN circuit_breakers.failures + 1 >= $2 THEN now()
+                       ELSE circuit_breakers.opened_at
+                   END,
+                   updated_at = now()
+            """,
+            self.name,
+            self.threshold,
+        )
+
+
+class DistributedGuardedLLMClient:
+    """`GuardedLLMClient` backed by Postgres-shared limiter and breaker state.
+
+    Same contract as the in-process version, but the guarantees hold across restarts
+    and across workers.
+    """
+
+    def __init__(
+        self,
+        client: object,
+        limiter: DistributedRateLimiter | None = None,
+        breaker: DistributedCircuitBreaker | None = None,
+    ) -> None:
+        self._client = client
+        self.limiter = limiter
+        self.breaker = breaker
+
+    async def complete(self, messages: list[Message], tools: list[ToolSpec]) -> Completion:
+        """Rate-limit, check the shared breaker, then delegate."""
+        if self.breaker is not None:
+            await self.breaker.before_call()
+        if self.limiter is not None:
+            await self.limiter.acquire()
+        try:
+            completion: Completion = await self._client.complete(messages, tools)  # type: ignore[attr-defined]
+        except Exception:
+            if self.breaker is not None:
+                await self.breaker.record_failure()
+            raise
+        if self.breaker is not None:
+            await self.breaker.record_success()
         return completion
