@@ -15,8 +15,6 @@ from agent_harness.tools import build_registry
 from agent_harness.tracer import Tracer
 from helpers import MockLLMClient
 
-pytestmark = pytest.mark.asyncio
-
 
 def _two_step_script(temp_repo: Path) -> list[Completion]:
     return [

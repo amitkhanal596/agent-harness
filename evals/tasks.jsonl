@@ -1,0 +1,6 @@
+{"id": "triage_failing_test", "task": "The CI suite in evals/fixture_repo is failing. Read evals/fixture_repo/ci_log.txt to find which test failed, then read the source file it exercises and tell me the name of the buggy function and the one-line fix. Answer with the function name and the corrected expression.", "expect_contains": ["apply_discount", "100"]}
+{"id": "find_config_port", "task": "Read evals/fixture_repo/config.ini and tell me which port the service is configured to listen on. Answer with just the number.", "expect_contains": ["8080"]}
+{"id": "grep_todo_owner", "task": "Search evals/fixture_repo for a TODO comment and tell me which file contains it and what it asks for.", "expect_contains": ["notes.py"]}
+{"id": "count_python_files", "task": "List the contents of evals/fixture_repo/src and tell me how many Python files it contains. Answer with the number.", "expect_contains": ["2"]}
+{"id": "run_failing_suite", "task": "Run the command 'python -m pytest evals/fixture_repo/tests -q' with the run_shell tool and report how many tests failed and how many passed.", "expect_contains": ["1", "3"]}
+{"id": "identify_dependency", "task": "Read evals/fixture_repo/requirements.txt and tell me which HTTP library the fixture project depends on. Answer with the library name.", "expect_contains": ["httpx"]}

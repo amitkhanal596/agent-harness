@@ -14,6 +14,7 @@ from .config import Settings, get_settings
 from .db import get_pool, run_migrations
 from .executor import Executor
 from .llm import LLMClient
+from .models import Completion, Message, ToolCall, ToolSpec
 from .tools import build_registry
 from .tracer import Tracer
 
@@ -174,3 +175,75 @@ def _summarize(
         "checkpoint_p95_ms": _percentile(checkpoint_latencies, 95),
         "text": "\n".join(lines),
     }
+
+
+FIXTURE_REPO = Path(__file__).resolve().parents[2] / "evals" / "fixture_repo"
+
+
+class ScriptedFixtureLLM:
+    """An offline stand-in model that solves the bundled eval tasks with real tool calls.
+
+    It exists so `agent eval --mock` and the test suite can exercise the whole harness
+    without network access. `sabotage=True` answers the CI-triage task incorrectly,
+    which is how the regression check in M8 lowers the pass rate.
+    """
+
+    def __init__(self, sabotage: bool = False, fixture: Path | None = None) -> None:
+        self.sabotage = sabotage
+        self.fixture = fixture or FIXTURE_REPO
+
+    async def complete(self, messages: list[Message], tools: list[ToolSpec]) -> Completion:
+        task = messages[0].content
+        if not any(m.role == "tool" for m in messages):
+            return Completion(
+                stop_reason="tool_use",
+                prompt_tokens=100,
+                output_tokens=25,
+                tool_calls=[self._first_call(task)],
+            )
+        return Completion(
+            stop_reason="end_turn",
+            prompt_tokens=200,
+            output_tokens=30,
+            text=self._answer(task),
+        )
+
+    def _first_call(self, task: str) -> ToolCall:
+        if "ci_log.txt" in task:
+            return ToolCall(
+                id="c1", name="read_file", input={"path": str(self.fixture / "ci_log.txt")}
+            )
+        if "config.ini" in task:
+            return ToolCall(
+                id="c1", name="read_file", input={"path": str(self.fixture / "config.ini")}
+            )
+        if "TODO" in task:
+            return ToolCall(
+                id="c1", name="grep", input={"pattern": "TODO", "path": str(self.fixture)}
+            )
+        if "how many Python files" in task:
+            return ToolCall(id="c1", name="list_dir", input={"path": str(self.fixture / "src")})
+        if "run_shell" in task:
+            return ToolCall(
+                id="c1",
+                name="run_shell",
+                input={"command": f"python -m pytest {self.fixture / 'tests'} -q"},
+            )
+        return ToolCall(
+            id="c1", name="read_file", input={"path": str(self.fixture / "requirements.txt")}
+        )
+
+    def _answer(self, task: str) -> str:
+        if "ci_log.txt" in task:
+            if self.sabotage:
+                return "The failing test is in the calculator; I could not identify the fix."
+            return "The buggy function is apply_discount; it should divide percent by 100, not 10."
+        if "config.ini" in task:
+            return "8080"
+        if "TODO" in task:
+            return "The TODO is in notes.py: handle unicode punctuation."
+        if "how many Python files" in task:
+            return "2"
+        if "run_shell" in task:
+            return "1 test failed and 3 passed."
+        return "httpx"

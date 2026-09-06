@@ -32,7 +32,8 @@ def _run_async(coro_factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
 def build_llm(settings: Settings) -> LLMClient:
     """Build the guarded Anthropic client from settings."""
     if not settings.anthropic_api_key:
-        raise typer.BadParameter("ANTHROPIC_API_KEY is not set (put it in .env)")
+        typer.echo("ANTHROPIC_API_KEY is not set (put it in .env)", err=True)
+        raise typer.Exit(code=2)
     client = AnthropicClient(
         model=settings.model,
         api_key=settings.anthropic_api_key,
@@ -212,13 +213,22 @@ def trace(run_id: str = typer.Argument(..., help="Run id to trace.")) -> None:
 def eval_command(
     tasks: str = typer.Option("evals/tasks.jsonl", help="Path to the labeled task set."),
     limit: int = typer.Option(0, help="Only run the first N tasks (0 = all)."),
+    mock: bool = typer.Option(
+        False, "--mock", help="Use the scripted offline model instead of the API."
+    ),
 ) -> None:
     """Run the eval set headlessly and print pass rate, avg cost, and avg latency."""
-    from .evals_runner import run_eval_set
+    from .evals_runner import ScriptedFixtureLLM, run_eval_set
 
     async def _main() -> None:
-        report: dict[str, Any] = await run_eval_set(tasks, limit=limit or None)
+        client = ScriptedFixtureLLM() if mock else None
+        try:
+            report: dict[str, Any] = await run_eval_set(tasks, limit=limit or None, llm=client)
+        except RuntimeError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from None
         typer.echo(report["text"])
+        raise typer.Exit(code=0 if report["pass_rate"] == 1.0 else 1)
 
     _run_async(_main)
 

@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: A `#` that starts the line or follows whitespace begins an inline comment. A `#`
+#: inside a token (a URL fragment, a password) is left alone.
+_INLINE_COMMENT = re.compile(r"(?:^|\s)#.*$")
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Drop a trailing ` # comment` from an unquoted .env value.
+
+    `.env.example` documents each variable with an inline comment; python-dotenv keeps
+    those on unquoted values, which would otherwise be read as the setting itself.
+    """
+    return _INLINE_COMMENT.sub("", value).strip()
 
 
 class Settings(BaseSettings):
-    """Runtime settings. Missing required secrets raise at construction time."""
+    """Runtime settings. Values come from the environment, then `.env`, then defaults."""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -18,6 +35,11 @@ class Settings(BaseSettings):
     tool_max_retries: int = 2
     run_budget_usd: float = 1.00
     anthropic_base_url: str = ""
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _clean(cls, value: Any) -> Any:
+        return _strip_inline_comment(value) if isinstance(value, str) else value
 
 
 def get_settings() -> Settings:

@@ -100,3 +100,26 @@ milestone's own acceptance checks.
   fail fast with `CircuitOpen` **without reaching the client** (asserted via a call
   counter that stays at 3); a run with a $0.000001 budget aborts with `BudgetExceeded`
   and `status="failed"` persisted in both the checkpoint and the `agent_runs` row.
+
+### M8 — Real task + evals ✅
+- Fixture repo at `evals/fixture_repo/`: a calculator library whose `apply_discount`
+  divides by 10 instead of 100, a pytest suite where `test_apply_discount` genuinely
+  fails (verified: `1 failed, 3 passed`), the captured `ci_log.txt`, plus `config.ini`,
+  `requirements.txt`, and a `TODO` for the other tasks.
+- `evals/tasks.jsonl`: **6 labeled tasks** (spec requires ≥5), including the headline
+  CI-failure-triage task that reads the CI log, then the source, and names the buggy
+  function. Tools exercised: `read_file`, `grep`, `run_shell`, `list_dir`.
+- `evals_runner.py` + `evals/run_eval.py` + `agent eval`: substring/absence grading,
+  pass rate, avg cost, avg latency, and checkpoint p50/p95. One failing task never
+  aborts the set.
+- `agent eval --mock` runs the whole set offline against `ScriptedFixtureLLM`, so the
+  command is demonstrable without an API key.
+- Acceptance: `agent eval` prints all three aggregate metrics (100% pass, $0.001725 avg
+  cost, 47.1 ms avg latency); a deliberately regressed agent drops the pass rate
+  **100% → 83%** (the triage task flips to FAIL).
+
+### Bug found and fixed along the way
+`pydantic-settings` read the `.env` inline comments as values — `ANTHROPIC_API_KEY`
+came back as the literal string `# required`, so `agent config` reported a key as set
+when none was. Added a `field_validator` that strips a `#` comment only when it starts
+the line or follows whitespace, leaving a `#` inside a URL or password intact.

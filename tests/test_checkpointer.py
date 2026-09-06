@@ -15,8 +15,6 @@ from agent_harness.models import Completion, ToolCall
 from agent_harness.tools import build_registry
 from helpers import MockLLMClient
 
-pytestmark = pytest.mark.asyncio
-
 
 def _script(temp_repo: Path) -> list[Completion]:
     """Three tool steps then a final answer — long enough to interrupt in the middle."""
