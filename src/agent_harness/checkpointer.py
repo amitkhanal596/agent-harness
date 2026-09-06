@@ -22,10 +22,19 @@ class Checkpointer:
         self._pool = pool
         self.write_latencies_ms: list[float] = []
 
-    async def create_run(self, task: str) -> State:
-        """Insert an `agent_runs` row and return the fresh State seeded with the task."""
+    async def create_run(self, task: str, parent_run_id: UUID | None = None) -> State:
+        """Insert an `agent_runs` row and return the fresh State seeded with the task.
+
+        `parent_run_id` links a delegated sub-task to the run that spawned it, so a child
+        is an ordinary run that merely knows its parent — every existing query, view, and
+        CLI command works on it unchanged.
+        """
         run_id: UUID = await self._pool.fetchval(
-            "INSERT INTO agent_runs (id, task) VALUES ($1, $2) RETURNING id", uuid4(), task
+            "INSERT INTO agent_runs (id, task, parent_run_id) VALUES ($1, $2, $3)"
+            " RETURNING id",
+            uuid4(),
+            task,
+            parent_run_id,
         )
         state = State(run_id=run_id, task=task)
         state.messages.append(_user_message(task))
@@ -91,6 +100,25 @@ class Checkpointer:
             run_id,
         )
         return [State.model_validate_json(r["state_json"]) for r in rows]
+
+    async def children(self, run_id: UUID) -> list[dict[str, object]]:
+        """Runs spawned by `run_id`, newest last."""
+        rows = await self._pool.fetch(
+            "SELECT id, task, status, step_count, total_cost_usd FROM agent_runs"
+            " WHERE parent_run_id = $1 ORDER BY created_at",
+            run_id,
+        )
+        return [dict(row) for row in rows]
+
+    async def tree_cost(self, run_id: UUID) -> dict[str, object]:
+        """Total cost of `run_id` and every run it delegated, recursively."""
+        row = await self._pool.fetchrow(
+            "SELECT * FROM run_trees WHERE root_id = $1", run_id
+        )
+        if row is None:
+            return {"root_id": run_id, "run_count": 0, "max_depth": 0,
+                    "tree_cost_usd": 0.0, "tree_tokens": 0}
+        return dict(row)
 
     async def mark_failed(self, run_id: UUID, error: str) -> None:
         """Record a terminal error on the run summary row."""

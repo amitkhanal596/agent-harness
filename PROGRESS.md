@@ -391,3 +391,38 @@ genuinely hard part: assembling tool calls across chunks.
   acting on half a tool call would be worse than waiting.
 - 15 tests across both items, including streaming that assembles a tool call correctly
   and produces a `Completion` of exactly the shape the loop already consumes.
+
+### §3.4 MCP support — ADDED (both directions) ✅
+The `Tool`/`Registry` interface was bespoke with no bridge to the protocol tools and
+agents increasingly use to find each other.
+- New `mcp.py`, thin by design. **Consuming**: `MCPClient` (JSON-RPC `tools/list` /
+  `tools/call`) and `MCPToolAdapter`, which presents a remote tool behind the existing
+  `Tool` ABC — so the executor's validation, timeout, retry, and tracing apply to it
+  unchanged and the harness cannot tell it is remote. **Exposing**: `mcp_tool_manifest`
+  and `handle_mcp_call` render this registry in MCP's shapes for other clients.
+- Input models are derived from the server's JSON Schema so **arguments are validated
+  before dispatch** — a bad call never leaves the process (there is a test asserting no
+  network request is made). `schema()` returns the server's own schema verbatim, since
+  the derived model cannot express every constraint.
+- `isError` results raise, so the executor reports them as tool errors rather than
+  feeding the model an error string that looks like success. In the other direction,
+  local failures become `isError` results rather than exceptions — mirroring
+  errors-as-data.
+- Implemented directly over `httpx` rather than adding the official SDK: the spec
+  forbids frameworks, and the wire format is a handful of methods.
+- 17 tests, including a full loop run against a remote MCP tool.
+
+### §3.5 Multi-agent orchestration — ADDED ✅
+The harness ran exactly one agent with no delegation of any kind.
+- Migration `005_subagents.sql` adds a self-referencing `parent_run_id` to `agent_runs`,
+  so **a child is an ordinary run that merely knows its parent** — every existing query,
+  view, and CLI command (`trace`, `replay`, `doctor`) works on it unchanged. Plus a
+  recursive `run_trees` view for true total cost.
+- New `spawn_agent` tool: the child runs its own loop with its own context, budget, and
+  trace, returning **one summary** to the parent. That is the actual purpose — a sub-task
+  that reads ten files hands back a sentence instead of ten file bodies, which is the
+  §2.1 context problem attacked from the other side.
+- Bounded: a depth cap (2) prevents runaway recursion, and the child's budget is a
+  bounded allowance so delegation cannot be used to escape the run budget.
+- 8 tests, including cost rolling up across the tree and a parent delegating through the
+  ordinary tool-call path.
