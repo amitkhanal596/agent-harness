@@ -47,3 +47,13 @@ milestone's own acceptance checks.
 - Acceptance: scripted `read_file` → answer returns the file's contents and the tool
   output is provably fed back to the model; unknown-tool and invalid-input calls produce
   `ToolResult.error` rather than exceptions. 36 tests pass.
+
+### M3 — Executor reliability ✅
+- Per-call `asyncio.wait_for` timeout, exponential backoff (0.1 · 2ⁿ), and
+  transient-vs-fatal classification (`TimeoutError`/`ConnectionError`/`OSError` retry;
+  everything else fails immediately; `FatalToolError` never retries).
+- Max-step cap enforced in the loop with `MaxStepsExceeded` and `status="failed"`.
+- Acceptance: a tool sleeping past the timeout yields `ERROR: slow timed out` and the
+  loop continues to a final answer; a tool failing twice then succeeding is retried
+  (3 attempts, `succeeded`); a never-stopping MockLLMClient trips `MaxStepsExceeded`
+  exactly at the cap. Backoff delays asserted as [0.1, 0.2, 0.4]. 47 tests pass.

@@ -139,3 +139,46 @@ async def test_multiple_tool_calls_in_one_step_are_all_answered(temp_repo: Path)
     assert await _agent(llm).run(state) == "done"
     tool_msgs = [m for m in state.messages if m.role == "tool"]
     assert [m.tool_call_id for m in tool_msgs] == ["a", "b"]
+
+
+async def test_timed_out_tool_lets_the_loop_continue() -> None:
+    """M3: a tool that sleeps past the timeout yields an error result, loop continues."""
+    import asyncio
+
+    from pydantic import BaseModel
+
+    from agent_harness.tools.base import Registry, Tool
+
+    class SlowInput(BaseModel):
+        pass
+
+    class SlowTool(Tool):
+        name = "slow"
+        description = "too slow"
+        InputModel = SlowInput
+
+        async def execute(self, args: BaseModel) -> str:
+            await asyncio.sleep(5)
+            return "never"
+
+    registry = Registry()
+    registry.register(SlowTool())
+    llm = MockLLMClient(
+        [
+            Completion(
+                stop_reason="tool_use",
+                tool_calls=[ToolCall(id="t1", name="slow", input={})],
+            ),
+            Completion(stop_reason="end_turn", text="moved on"),
+        ]
+    )
+    agent = Agent(
+        llm=llm,
+        registry=registry,
+        executor=Executor(registry, timeout=0.05, max_retries=0),
+        max_steps=5,
+    )
+    state = _state()
+    assert await agent.run(state) == "moved on"
+    assert state.status == "completed"
+    assert next(m for m in state.messages if m.role == "tool").content == "ERROR: slow timed out"
