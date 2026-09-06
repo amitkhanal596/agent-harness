@@ -30,6 +30,10 @@ agent = "agent_harness.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_harness"]
 
+# Ship the SQL with the package so `run_migrations` works from an installed wheel
+# (e.g. inside a container), not just from a source checkout.
+force-include = { "migrations" = "agent_harness/migrations" }
+
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]

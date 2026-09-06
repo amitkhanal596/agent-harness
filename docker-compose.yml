@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Applies migrations once, then exits. Everything else waits on it.
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:dev@postgres:5432/agent
+    command: ["migrate"]
+    restart: "no"
+
+  agent:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://postgres:dev@postgres:5432/agent
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MODEL: ${MODEL:-claude-sonnet-4-5}
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
+    # The default command proves the stack works end to end with no API key.
+    # Run a real task with:
+    #   docker compose run --rm agent run "read ./config.txt and tell me the port"
+    #
+    # Note: use `docker compose run`, or plain `docker compose up` — do NOT pass
+    # --abort-on-container-exit, which tears down Postgres the moment the one-shot
+    # `migrate` service exits, before `agent` can connect.
+    command: ["eval", "--mock"]
+
+volumes:
+  pgdata:

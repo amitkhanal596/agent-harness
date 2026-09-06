@@ -28,3 +28,14 @@ async def test_migrations_are_idempotent(db_pool: object, tmp_path: Path) -> Non
     second = await run_migrations(db_pool)  # type: ignore[arg-type]
     assert second == []
     assert isinstance(first, list)
+
+
+def test_migrations_dir_resolves_and_contains_sql() -> None:
+    """Regression (§3.8): MIGRATIONS_DIR must exist for installed packages too.
+
+    It was computed as `parents[2]/migrations`, which is correct in a source checkout
+    but resolves to a nonexistent path inside a wheel/container — migrations then
+    silently applied nothing and every query failed on a missing table.
+    """
+    assert MIGRATIONS_DIR.is_dir(), f"{MIGRATIONS_DIR} does not exist"
+    assert sorted(p.name for p in MIGRATIONS_DIR.glob("*.sql")), "no .sql files found"

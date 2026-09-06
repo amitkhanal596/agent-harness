@@ -8,7 +8,21 @@ import asyncpg
 
 from .config import get_settings
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+
+def _find_migrations_dir() -> Path:
+    """Locate the migrations directory for both source checkouts and installed packages.
+
+    In a source checkout the SQL lives at `<repo>/migrations`. Once installed it is
+    shipped as package data at `agent_harness/migrations`. Resolving only the former
+    silently yields a nonexistent path inside a container, so check both.
+    """
+    packaged = Path(__file__).resolve().parent / "migrations"
+    if packaged.is_dir():
+        return packaged
+    return Path(__file__).resolve().parents[2] / "migrations"
+
+
+MIGRATIONS_DIR = _find_migrations_dir()
 
 _APPLIED_TABLE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
