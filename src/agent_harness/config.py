@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     run_budget_usd: float = 1.00
     anthropic_base_url: str = ""
     cache_prompt: bool = False
+    max_context_tokens: int = 150_000
+    keep_recent_messages: int = 8
 
     @field_validator("*", mode="before")
     @classmethod

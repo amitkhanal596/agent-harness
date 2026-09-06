@@ -6,6 +6,7 @@ import time
 from typing import Protocol
 from uuid import UUID
 
+from .context import CompactionResult, ContextManager
 from .executor import Executor
 from .llm import LLMClient, cost_usd
 from .models import Completion, Message, State, ToolResult
@@ -32,6 +33,7 @@ class SupportsTrace(Protocol):
     async def tool(
         self, state: State, result: ToolResult, tool_name: str, latency_ms: int
     ) -> None: ...
+    async def spent_usd(self, run_id: UUID) -> float: ...
 
 
 class _NullCheckpointer:
@@ -55,6 +57,9 @@ class _NullTracer:
     ) -> None:
         return None
 
+    async def spent_usd(self, run_id: UUID) -> float:
+        return 0.0
+
 
 class Agent:
     """Drives one run to completion.
@@ -73,6 +78,7 @@ class Agent:
         tracer: SupportsTrace | None = None,
         max_steps: int = 25,
         budget_usd: float = 1.00,
+        context: ContextManager | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -81,7 +87,9 @@ class Agent:
         self.tracer: SupportsTrace = tracer or _NullTracer()
         self.max_steps = max_steps
         self.budget_usd = budget_usd
+        self.context = context
         self.total_cost_usd = 0.0
+        self.last_compaction: CompactionResult | None = None
 
     async def run(self, state: State) -> str:
         """Run the loop until the model answers, the budget trips, or the cap is hit."""
@@ -89,7 +97,7 @@ class Agent:
 
         while state.step_count < self.max_steps:
             t0 = time.perf_counter()
-            comp = await self.llm.complete(state.messages, specs)
+            comp = await self.llm.complete(self._prompt_messages(state), specs)
             latency_ms = int((time.perf_counter() - t0) * 1000)
             step_cost = cost_usd(comp.prompt_tokens, comp.output_tokens)
             await self.tracer.llm(state, comp, latency_ms=latency_ms, cost_usd=step_cost)
@@ -132,6 +140,25 @@ class Agent:
         await self.checkpointer.save(state)
         raise MaxStepsExceeded(f"run hit the {self.max_steps}-step cap without finishing")
 
+    def _prompt_messages(self, state: State) -> list[Message]:
+        """The messages to send this iteration, compacted to fit the context window.
+
+        Compaction applies to the *prompt*, never to `state.messages`: the checkpoint
+        keeps the full history so replay and audit stay lossless, while the model sees a
+        window that fits. `last_compaction` exposes what the most recent pass did.
+        """
+        if self.context is None:
+            return state.messages
+        result = self.context.compact(state.messages)
+        self.last_compaction = result
+        return result.messages
+
     async def resume(self, run_id: UUID) -> str:
-        """Load the newest checkpoint for `run_id` and continue the loop from there."""
-        return await self.run(await self.checkpointer.latest(run_id))
+        """Load the newest checkpoint for `run_id` and continue the loop from there.
+
+        Seeds `total_cost_usd` from what the run has already spent, so the budget spans
+        the whole run rather than resetting on every restart.
+        """
+        state = await self.checkpointer.latest(run_id)
+        self.total_cost_usd = await self.tracer.spent_usd(run_id)
+        return await self.run(state)

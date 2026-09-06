@@ -78,6 +78,17 @@ class Tracer:
             result.error,
         )
 
+    async def spent_usd(self, run_id: UUID) -> float:
+        """Total model spend already recorded for `run_id`.
+
+        The loop seeds its in-memory budget counter from this on resume, so a restarted
+        run continues against the same budget instead of being granted a fresh one.
+        """
+        total = await self._pool.fetchval(
+            "SELECT total_cost_usd FROM agent_runs WHERE id = $1", run_id
+        )
+        return float(total) if total is not None else 0.0
+
     async def timeline(self, run_id: UUID) -> list[dict[str, Any]]:
         """Every event for `run_id` in insertion order, for `agent trace`."""
         rows = await self._pool.fetch(

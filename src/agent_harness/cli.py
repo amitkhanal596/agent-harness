@@ -13,6 +13,7 @@ import typer
 from .agent import Agent, BudgetExceeded, MaxStepsExceeded
 from .checkpointer import Checkpointer
 from .config import Settings, get_settings
+from .context import ContextManager
 from .db import get_pool, run_migrations
 from .executor import Executor
 from .guardrails import CircuitBreaker, GuardedLLMClient, RateLimiter
@@ -64,6 +65,10 @@ def build_agent(
         tracer=tracer,
         max_steps=settings.max_steps,
         budget_usd=settings.run_budget_usd,
+        context=ContextManager(
+            max_tokens=settings.max_context_tokens,
+            keep_recent_messages=settings.keep_recent_messages,
+        ),
     )
     return agent, checkpointer, tracer
 

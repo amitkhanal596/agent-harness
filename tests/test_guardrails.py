@@ -20,7 +20,7 @@ from agent_harness.guardrails import (
     RateLimiter,
     check_budget,
 )
-from agent_harness.models import Completion, Message, State, ToolSpec
+from agent_harness.models import Completion, Message, State, ToolCall, ToolSpec
 from agent_harness.tools import build_registry
 from helpers import MockLLMClient
 
@@ -178,3 +178,67 @@ async def test_guarded_client_applies_rate_limit_before_calling() -> None:
     await guarded.complete([], [])
     assert time.perf_counter() - t0 >= 0.03
     assert len(inner.calls) == 2
+
+
+async def test_resume_does_not_reset_the_budget(db_pool: asyncpg.Pool) -> None:
+    """§2.3 regression: a resumed run continues against the spend it already incurred.
+
+    Before the fix, `Agent.total_cost_usd` reset to 0 on every `resume()`, so a run
+    could be restarted indefinitely and never trip its budget.
+    """
+    from agent_harness.tracer import Tracer
+
+    registry = build_registry()
+    cp, tracer = Checkpointer(db_pool), Tracer(db_pool)
+
+    # Step 1: an expensive call that stays under the budget, then a crash.
+    class OneExpensiveCallThenDie:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages: object, tools: object) -> Completion:
+            self.calls += 1
+            if self.calls == 1:
+                # $0.60 of a $1.00 budget: 200k input tokens at $3/1M.
+                return Completion(
+                    stop_reason="tool_use",
+                    prompt_tokens=200_000,
+                    output_tokens=0,
+                    tool_calls=[ToolCall(id="t1", name="list_dir", input={"path": "."})],
+                )
+            raise RuntimeError("process died")
+
+    agent = Agent(
+        llm=OneExpensiveCallThenDie(),
+        registry=registry,
+        executor=Executor(registry, timeout=5.0, max_retries=0),
+        checkpointer=cp,
+        tracer=tracer,
+        max_steps=10,
+        budget_usd=1.00,
+    )
+    state = await cp.create_run("expensive run")
+    with pytest.raises(RuntimeError):
+        await agent.run(state)
+
+    spent = await tracer.spent_usd(state.run_id)
+    assert spent == pytest.approx(0.60, abs=1e-6)
+
+    # Resume with another $0.60 call: cumulative $1.20 must trip the $1.00 budget.
+    resumed = Agent(
+        llm=MockLLMClient(
+            [Completion(stop_reason="end_turn", text="done", prompt_tokens=200_000,
+                        output_tokens=0)]
+        ),
+        registry=registry,
+        executor=Executor(registry, timeout=5.0, max_retries=0),
+        checkpointer=cp,
+        tracer=tracer,
+        max_steps=10,
+        budget_usd=1.00,
+    )
+    with pytest.raises(BudgetExceeded):
+        await resumed.resume(state.run_id)
+
+    row = await db_pool.fetchrow("SELECT status FROM agent_runs WHERE id = $1", state.run_id)
+    assert row["status"] == "failed"

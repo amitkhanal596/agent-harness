@@ -11,6 +11,7 @@ from typing import Any
 from .agent import Agent, BudgetExceeded, MaxStepsExceeded
 from .checkpointer import Checkpointer
 from .config import Settings, get_settings
+from .context import ContextManager
 from .db import get_pool, run_migrations
 from .executor import Executor
 from .llm import LLMClient
@@ -81,6 +82,10 @@ async def run_eval_set(
                 tracer=tracer,
                 max_steps=cfg.max_steps,
                 budget_usd=cfg.run_budget_usd,
+                context=ContextManager(
+                    max_tokens=cfg.max_context_tokens,
+                    keep_recent_messages=cfg.keep_recent_messages,
+                ),
             )
             state = await checkpointer.create_run(task.task)
             t0 = time.perf_counter()
@@ -228,7 +233,7 @@ class ScriptedFixtureLLM:
             return ToolCall(
                 id="c1",
                 name="run_shell",
-                input={"command": f"python -m pytest {self.fixture / 'tests'} -q"},
+                input={"command": f"pytest {self.fixture / 'tests'} -q"},
             )
         return ToolCall(
             id="c1", name="read_file", input={"path": str(self.fixture / "requirements.txt")}

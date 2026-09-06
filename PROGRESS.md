@@ -182,3 +182,54 @@ the line or follows whitespace, leaving a `#` inside a URL or password intact.
 ./.venv/bin/agent eval --mock       # 100% pass rate, offline
 ./.venv/bin/python scripts/instrument.py   # regenerate the §9 metrics
 ```
+
+---
+
+# Phase 2 — Addressing CRITIQUE.md
+
+Working through every item in `CRITIQUE.md`. Gate unchanged: `pytest`, `ruff check`,
+`mypy src` must all pass after each item.
+
+### §2.3 Resume budget-reset bug — FIXED ✅
+`Agent.total_cost_usd` reset to `0.0` on every `resume()`, so a run restarted after
+spending $0.80 of a $1.00 budget got a fresh $1.00 — the budget guarantee was void
+across restarts.
+- Added `spent_usd(run_id)` to the tracer protocol and to `Tracer` (reads the persisted
+  `agent_runs.total_cost_usd`); `resume()` now seeds its counter from it.
+- Regression test `test_resume_does_not_reset_the_budget`: spend $0.60, crash, resume
+  with another $0.60 → `BudgetExceeded` with `status="failed"` persisted. **Verified the
+  test fails when the fix is reverted.**
+
+### §2.5 `run_shell` allowlist was an argv[0]-only check — FIXED ✅
+`python3 -c "import os; os.system(...)"` passed the old allowlist trivially, because
+only the program name was checked. This was a genuine sandbox escape.
+- Removed every general-purpose interpreter (`python`, `python3`) from the allowlist.
+- Replaced the flat `frozenset` of programs with a `dict[str, frozenset[str]]` mapping
+  each program to the flags/subcommands it may **not** use, and added `check_command()`
+  which validates arguments as well as the program:
+  `find -exec/-delete`, `git -c/--exec-path/commit/push/config`, `awk -f`, `sed -i`,
+  `pytest -p/--pdb` are all now rejected. Flags with attached values (`--exec-path=/x`)
+  are caught too, as are path-prefixed programs (`/usr/bin/python3`).
+- 41 new tests in `tests/test_shell_security.py` covering interpreter bypasses, escape
+  flags, legitimate read-only commands, and a regression guard asserting no interpreter
+  is ever re-added to the allowlist.
+- Updated the one eval task that used `python -m pytest` to call `pytest` directly.
+
+### §2.1 Unbounded context window — FIXED ✅
+The loop resent the entire message history on every iteration with no token management,
+so a long run grew quadratically and would eventually exceed the model's context window.
+- New `context.py`: `ContextManager` with a two-stage, progressively lossier strategy —
+  (1) truncate old tool results (the bulk of a long run, least valuable verbatim once
+  acted on), then (2) drop whole oldest turn-groups. Plus `estimate_tokens`,
+  `message_tokens`, `conversation_tokens`, and a `CompactionResult` record.
+- **Compaction applies to the prompt, never to `state.messages`** — checkpoints stay
+  lossless so replay and audit are unaffected; only what the model sees is trimmed.
+- Invariants held: the task message always survives, the recent window keeps full
+  fidelity, and **every `tool_use` keeps its matching `tool_result`** (breaking that
+  pairing makes the API request invalid — it is the failure mode compaction is most
+  likely to cause).
+- 29 tests in `tests/test_context.py`, including a parametrized grid (4 window sizes ×
+  3 conversation lengths) asserting the tool_use/tool_result invariant, and an
+  end-to-end check that compacted output still survives `to_anthropic_messages`.
+- Wired through `MAX_CONTEXT_TOKENS` / `KEEP_RECENT_MESSAGES` config into the CLI and
+  the eval runner. Opt-in: an `Agent` without a `ContextManager` behaves exactly as before.

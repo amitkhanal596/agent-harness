@@ -4,16 +4,75 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+from pathlib import PurePath
 
 from pydantic import BaseModel, Field
 
 from .base import Tool
 
-# Only these executables may be run. Anything else is rejected before spawning.
-ALLOWED_COMMANDS = frozenset(
-    {"ls", "cat", "head", "tail", "wc", "echo", "pwd", "grep", "find", "git", "python",
-     "python3", "pytest", "sed", "awk", "sort", "uniq", "diff", "stat", "which"}
-)
+#: Programs the agent may run, mapped to the flags/subcommands each one forbids.
+#:
+#: Allowlisting the *program* is not enough on its own: an interpreter or a tool with an
+#: `--exec`-style escape hatch turns a one-entry allowlist into arbitrary code execution.
+#: `python -c "import os; os.system(...)"` passes any argv[0]-only check trivially. So
+#: each entry also names the argument patterns that re-open that hole.
+#:
+#: Interpreters (`python`, `python3`, `sh`, `bash`, `perl`, `ruby`, `node`) are absent by
+#: design — there is no subset of their flags that is safely lockable, and no built-in
+#: tool or eval task needs them. `pytest` is the one interpreter-adjacent entry kept,
+#: because CI triage is the harness's headline task; its plugin-loading escape (`-p`)
+#: is blocked below.
+ALLOWED_COMMANDS: dict[str, frozenset[str]] = {
+    "ls": frozenset(),
+    "cat": frozenset(),
+    "head": frozenset(),
+    "tail": frozenset(),
+    "wc": frozenset(),
+    "echo": frozenset(),
+    "pwd": frozenset(),
+    "grep": frozenset(),
+    "sort": frozenset(),
+    "uniq": frozenset(),
+    "diff": frozenset(),
+    "stat": frozenset(),
+    "which": frozenset(),
+    # `find -exec/-execdir/-delete/-fprintf` run programs or write files.
+    "find": frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprintf", "-fls"}),
+    # `sed -e/-f` with the `e` command, and `-i`, execute or rewrite. Keep it read-only.
+    "sed": frozenset({"-i", "--in-place", "-s", "--separate"}),
+    # `awk` can shell out via system()/print|"cmd"; `-f` loads an arbitrary program file.
+    "awk": frozenset({"-f", "--file", "--source", "-v"}),
+    # git subcommands that run hooks, filters, or user-supplied programs.
+    "git": frozenset(
+        {
+            "-c",
+            "--exec-path",
+            "-C",
+            "--upload-pack",
+            "--receive-pack",
+            "commit",
+            "push",
+            "pull",
+            "fetch",
+            "clone",
+            "filter-branch",
+            "submodule",
+            "daemon",
+            "send-email",
+            "gc",
+            "config",
+            "clean",
+            "reset",
+            "checkout",
+            "rebase",
+            "merge",
+            "apply",
+            "am",
+        }
+    ),
+    # `pytest -p` loads arbitrary plugins; the rest of pytest is a test runner.
+    "pytest": frozenset({"-p", "--plugin", "--pdb", "--pdbcls", "-c", "--rootdir"}),
+}
 
 DEFAULT_TIMEOUT = 30.0
 MAX_OUTPUT_BYTES = 32 * 1024
@@ -24,21 +83,52 @@ class RunShellInput(BaseModel):
 
 
 class DisallowedCommandError(Exception):
-    """Raised when the requested program is not on the allowlist."""
+    """Raised when the requested program or one of its arguments is not permitted."""
+
+
+def check_command(parts: list[str]) -> None:
+    """Validate a split command line against the allowlist.
+
+    Raises `DisallowedCommandError` when the program is not allowlisted or when one of
+    its arguments matches that program's forbidden set. Checking arguments matters as
+    much as checking the program: several allowlisted tools can execute other programs
+    through a flag.
+    """
+    if not parts:
+        raise DisallowedCommandError("empty command")
+
+    program = PurePath(parts[0]).name
+    if program not in ALLOWED_COMMANDS:
+        raise DisallowedCommandError(
+            f"command {program!r} is not allowlisted; allowed: "
+            f"{', '.join(sorted(ALLOWED_COMMANDS))}"
+        )
+
+    forbidden = ALLOWED_COMMANDS[program]
+    for arg in parts[1:]:
+        # Compare the flag itself, so `--exec-path=/x` is caught alongside `--exec-path`.
+        token = arg.split("=", 1)[0]
+        if token in forbidden:
+            raise DisallowedCommandError(
+                f"argument {token!r} is not permitted for {program!r}: it can execute "
+                "another program or write to the filesystem"
+            )
 
 
 class RunShellTool(Tool):
     """Run a command without a shell.
 
-    Raises DisallowedCommandError for a non-allowlisted program and TimeoutError if the
-    process outruns the timeout; both surface to the model as a tool error.
+    Raises DisallowedCommandError when the program or an argument is not permitted, and
+    TimeoutError if the process outruns the timeout; both surface to the model as a tool
+    error rather than crashing the loop.
     """
 
     name = "run_shell"
     description = (
-        "Run a shell command and return its combined stdout and stderr. Only these "
-        f"programs are permitted: {', '.join(sorted(ALLOWED_COMMANDS))}. "
-        "Shell metacharacters (pipes, redirects, ;, &&) are not interpreted."
+        "Run a command and return its combined stdout and stderr. Only these programs "
+        f"are permitted: {', '.join(sorted(ALLOWED_COMMANDS))}. Flags that would let a "
+        "permitted program execute another program are rejected. Shell metacharacters "
+        "(pipes, redirects, ;, &&) are not interpreted."
     )
     InputModel = RunShellInput
 
@@ -48,14 +138,7 @@ class RunShellTool(Tool):
     async def execute(self, args: BaseModel) -> str:
         assert isinstance(args, RunShellInput)
         parts = shlex.split(args.command)
-        if not parts:
-            raise DisallowedCommandError("empty command")
-        program = parts[0].rsplit("/", 1)[-1]
-        if program not in ALLOWED_COMMANDS:
-            raise DisallowedCommandError(
-                f"command {program!r} is not allowlisted; allowed: "
-                f"{', '.join(sorted(ALLOWED_COMMANDS))}"
-            )
+        check_command(parts)
 
         proc = await asyncio.create_subprocess_exec(
             *parts,
